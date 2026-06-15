@@ -193,6 +193,60 @@ def load_data(cfg):
     return train_loader, val_loader, test_loader, norm_stats
 
 
+def resolve_device(cfg) -> torch.device:
+    """Pick training device and print GPU info at startup."""
+    train_cfg = cfg.get("training", {})
+    device_name = str(train_cfg.get("device", "cuda")).lower()
+    require_gpu = bool(train_cfg.get("require_gpu", device_name == "cuda"))
+    cuda_available = torch.cuda.is_available()
+
+    print("=" * 10)
+    print("Device check")
+    print(f"  PyTorch: {torch.__version__}")
+    print(f"  CUDA available: {cuda_available}")
+    if cuda_available:
+        print(f"  CUDA version: {torch.version.cuda}")
+        print(f"  GPU count: {torch.cuda.device_count()}")
+        for i in range(torch.cuda.device_count()):
+            props = torch.cuda.get_device_properties(i)
+            mem_gb = props.total_memory / (1024**3)
+            print(f"  GPU {i}: {props.name} ({mem_gb:.1f} GB)")
+    else:
+        print("  No GPU detected — training will use CPU unless you install CUDA PyTorch.")
+
+    if device_name in ("cuda", "gpu"):
+        if not cuda_available:
+            if require_gpu:
+                raise RuntimeError(
+                    "training.device is 'cuda' but no GPU was found. "
+                    "Install a CUDA-enabled PyTorch build or set training.device: cpu."
+                )
+            print("  WARNING: GPU requested but not available — falling back to CPU.")
+            device = torch.device("cpu")
+        else:
+            gpu_id = int(train_cfg.get("gpu_id", 0))
+            if gpu_id >= torch.cuda.device_count():
+                raise RuntimeError(
+                    f"training.gpu_id={gpu_id} is invalid; only {torch.cuda.device_count()} GPU(s) found."
+                )
+            device = torch.device(f"cuda:{gpu_id}")
+            torch.cuda.set_device(device)
+    elif device_name == "cpu":
+        if require_gpu:
+            raise RuntimeError("training.require_gpu is true but training.device is 'cpu'.")
+        device = torch.device("cpu")
+    elif device_name == "auto":
+        device = torch.device("cuda" if cuda_available else "cpu")
+    else:
+        raise ValueError(f"Unknown training.device: {device_name} (use cuda, cpu, or auto)")
+
+    print(f"  Using device: {device}")
+    if device.type == "cuda":
+        print(f"  Active GPU: {torch.cuda.get_device_name(device)}")
+    print("=" * 10)
+    return device
+
+
 def build_model(cfg, device):
     model_cfg = cfg["model"]
     name = model_cfg["name"].lower()
@@ -416,6 +470,8 @@ if __name__ == "__main__":
     with open(CODE_DIR / "hyperparameter.yaml", "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
+    device = resolve_device(cfg)
+
     train_loader, val_loader, test_loader, norm_stats = load_data(cfg)
 
     for name, loader in [("train", train_loader), ("val", val_loader), ("test", test_loader)]:
@@ -428,7 +484,6 @@ if __name__ == "__main__":
             f"y_watts min={y_watts.min():.1f}, max={y_watts.max():.1f}"
         )
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_model(cfg, device)
     print(f"model: {cfg['model']['name']}")
     print(f"normalization: {norm_stats}")

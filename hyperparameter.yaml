@@ -46,6 +46,9 @@ model:
 
 # Training (combined = Huber regression + ON/OFF switch penalty)
 training:
+  device: cuda
+  require_gpu: true
+  gpu_id: 0
   epochs: 50
   lr: 0.001
   seed: 42
