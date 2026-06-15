@@ -3,9 +3,8 @@ Run the full NILM experiment grid and append results to CSV.
 
 Examples:
     python run_experiments.py --suite strategy
-    python run_experiments.py --suite ratio --appliance kettle
-    python run_experiments.py --suite all --skip-existing
-    python run_experiments.py --dry-run
+    python run_experiments.py --suite all --skip-existing --no-plots
+    python run_experiments.py --summary-only --suite all
 """
 
 from __future__ import annotations
@@ -45,6 +44,14 @@ RESULT_COLUMNS = [
     "timestamp",
     "status",
     "error",
+]
+
+APPLIANCE_ORDER = ["washingmachine", "dishwasher", "fridge", "microwave", "kettle"]
+APPLIANCE_HEADERS = ["WM", "DW", "Fridge", "MW", "Kettle"]
+METRIC_SPECS = [
+    ("MAE", "test_mae", ".2f"),
+    ("SAE (%)", "test_sae", ".2f"),
+    ("F1", "test_f1", ".4f"),
 ]
 
 
@@ -118,11 +125,150 @@ def iter_runs(exp_cfg: dict, suite: str, appliances: list[str] | None, models: l
 
 
 def load_results_csv(path: Path) -> dict[str, dict]:
+    """Load results CSV; keep the latest row per run_id."""
     if not path.exists():
         return {}
     with open(path, "r", encoding="utf-8", newline="") as f:
         rows = list(csv.DictReader(f))
-    return {row["run_id"]: row for row in rows if row.get("run_id")}
+    latest: dict[str, dict] = {}
+    for row in rows:
+        run_id = row.get("run_id")
+        if not run_id:
+            continue
+        prev = latest.get(run_id)
+        if prev is None or row.get("timestamp", "") >= prev.get("timestamp", ""):
+            latest[run_id] = row
+    return latest
+
+
+def format_metric(value: str | float | int | None, fmt: str) -> str:
+    if value is None or value == "":
+        return "--"
+    try:
+        return format(float(value), fmt)
+    except (TypeError, ValueError):
+        return "--"
+
+
+def lookup_cell(
+    results: dict[str, dict],
+    *,
+    model: str,
+    appliance: str,
+    train_dataset: str,
+    metric_key: str,
+    fmt: str,
+) -> str:
+    run_id = make_run_id(model, appliance, train_dataset)
+    row = results.get(run_id)
+    if row is None or row.get("status") not in {"ok", "eval_only"}:
+        return "--"
+    return format_metric(row.get(metric_key), fmt)
+
+
+def _print_text_table(
+    title: str,
+    row_label_header: str,
+    row_specs: list[tuple[str, str]],
+    models: list[str],
+    cell_fn,
+) -> None:
+    col_w = 10
+    label_w = max(22, len(row_label_header) + 2)
+
+    print()
+    print(title)
+    print("-" * (label_w + col_w * len(APPLIANCE_HEADERS)))
+
+    header = f"{row_label_header:<{label_w}}" + "".join(f"{h:>{col_w}}" for h in APPLIANCE_HEADERS)
+    print(header)
+    print("-" * (label_w + col_w * len(APPLIANCE_HEADERS)))
+
+    for model in models:
+        model_title = model.upper()
+        print(f"[{model_title}]")
+        for row_label, row_key in row_specs:
+            cells = []
+            for appliance in APPLIANCE_ORDER:
+                cells.append(cell_fn(model, appliance, row_key))
+            line = f"  {row_label:<{label_w - 2}}" + "".join(f"{c:>{col_w}}" for c in cells)
+            print(line)
+        print()
+
+
+def print_strategy_summary(exp_cfg: dict, results: dict[str, dict]) -> None:
+    models = exp_cfg.get("models", ["cnn"])
+    runs = exp_cfg["strategy_comparison"]
+    row_specs = [(r["paper_strategy"], r["label"]) for r in runs]
+
+    print("\n" + "=" * 72)
+    print("STRATEGY COMPARISON (test set)")
+    print("=" * 72)
+
+    for metric_name, metric_key, fmt in METRIC_SPECS:
+        def cell_fn_metric(model: str, appliance: str, strategy_label: str) -> str:
+            run = next(r for r in runs if r["label"] == strategy_label)
+            return lookup_cell(
+                results,
+                model=model,
+                appliance=appliance,
+                train_dataset=run["train_dataset"],
+                metric_key=metric_key,
+                fmt=fmt,
+            )
+
+        _print_text_table(
+            f"Metric: {metric_name}",
+            "Strategy",
+            row_specs,
+            models,
+            cell_fn_metric,
+        )
+
+
+def print_ratio_summary(exp_cfg: dict, results: dict[str, dict]) -> None:
+    models = exp_cfg.get("models", ["cnn"])
+    runs = exp_cfg["ratio_sensitivity"]
+    row_specs = [(f"{r['rho']}%", r["label"]) for r in runs]
+
+    print("\n" + "=" * 72)
+    print("RATIO SENSITIVITY — D3 BALANCED (test set)")
+    print("=" * 72)
+
+    for metric_name, metric_key, fmt in METRIC_SPECS:
+        def cell_fn_metric(model: str, appliance: str, ratio_label: str) -> str:
+            run = next(r for r in runs if r["label"] == ratio_label)
+            return lookup_cell(
+                results,
+                model=model,
+                appliance=appliance,
+                train_dataset=run["train_dataset"],
+                metric_key=metric_key,
+                fmt=fmt,
+            )
+
+        _print_text_table(
+            f"Metric: {metric_name}",
+            "rho",
+            row_specs,
+            models,
+            cell_fn_metric,
+        )
+
+
+def print_results_summary(exp_cfg: dict, results_path: Path, suite: str) -> None:
+    results = load_results_csv(results_path)
+    if not results:
+        print("\nNo results in CSV yet.")
+        return
+
+    ok = sum(1 for r in results.values() if r.get("status") in {"ok", "eval_only"})
+    print(f"\nResults loaded: {ok}/{len(results)} runs with metrics")
+
+    if suite in ("strategy", "all"):
+        print_strategy_summary(exp_cfg, results)
+    if suite in ("ratio", "all"):
+        print_ratio_summary(exp_cfg, results)
 
 
 def append_result(path: Path, row: dict) -> None:
@@ -189,6 +335,11 @@ def main() -> int:
     parser.add_argument("--eval-only", action="store_true", help="Evaluate checkpoints without training")
     parser.add_argument("--no-plots", action="store_true", help="Disable per-run figure export")
     parser.add_argument("--dry-run", action="store_true", help="Print planned runs only")
+    parser.add_argument(
+        "--summary-only",
+        action="store_true",
+        help="Skip training; print tables from existing CSV",
+    )
     args = parser.parse_args()
 
     exp_cfg = load_experiments(Path(args.experiments))
@@ -197,6 +348,11 @@ def main() -> int:
 
     appliances = args.appliance or None
     models = args.model or None
+
+    if args.summary_only:
+        print_results_summary(exp_cfg, results_path, args.suite)
+        return 0
+
     planned = list(iter_runs(exp_cfg, args.suite, appliances, models))
 
     print(f"Suite: {args.suite}")
@@ -241,8 +397,9 @@ def main() -> int:
             existing[run_id] = row
             completed += 1
             print(
-                f"saved -> test MAE {row['test_mae']:.2f} W | "
-                f"SAE {row['test_sae']:.2f}% | F1 {row['test_f1']:.4f}"
+                f"saved -> test MAE {format_metric(row['test_mae'], '.2f')} W | "
+                f"SAE {format_metric(row['test_sae'], '.2f')}% | "
+                f"F1 {format_metric(row['test_f1'], '.4f')}"
             )
         except Exception as exc:
             failed += 1
@@ -262,8 +419,9 @@ def main() -> int:
 
     print("\n" + "=" * 60)
     print(f"Done. completed={completed}, skipped={skipped}, failed={failed}")
-    print(f"Results: {results_path}")
+    print(f"Results CSV: {results_path}")
     print("=" * 60)
+    print_results_summary(exp_cfg, results_path, args.suite)
     return 1 if failed else 0
 
 
