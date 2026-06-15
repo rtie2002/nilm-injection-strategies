@@ -291,8 +291,15 @@ def get_checkpoint_path(cfg) -> Path:
     appliance = cfg["data"]["appliance"]
     train_cfg = cfg["training"]
     save_dir = CODE_DIR / train_cfg.get("save_dir", "checkpoints")
-    name_template = train_cfg.get("checkpoint_name", "{appliance}_best_epoch.pt")
-    return save_dir / name_template.format(appliance=appliance)
+    name_template = train_cfg.get(
+        "checkpoint_name",
+        "{model}_{appliance}_{train_dataset}_best.pt",
+    )
+    return save_dir / name_template.format(
+        appliance=appliance,
+        train_dataset=cfg["data"]["train_dataset"],
+        model=cfg["model"]["name"].lower(),
+    )
 
 
 def build_model(cfg, device):
@@ -514,28 +521,117 @@ def load_checkpoint_model(model, save_path: Path, device) -> dict | None:
     return ckpt
 
 
-if __name__ == "__main__":
-    with open(CODE_DIR / "hyperparameter.yaml", "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
+def _deep_update(base: dict, overrides: dict) -> dict:
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _deep_update(base[key], value)
+        else:
+            base[key] = value
+    return base
 
+
+def load_config(config_path: Path | str | None = None, overrides: dict | None = None) -> dict:
+    path = Path(config_path) if config_path else CODE_DIR / "hyperparameter.yaml"
+    with open(path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    if overrides:
+        _deep_update(cfg, overrides)
+    return cfg
+
+
+def configure_run_paths(cfg: dict) -> dict:
+    """Unique checkpoint and figure paths per appliance / strategy / model."""
+    model = cfg["model"]["name"].lower()
+    appliance = cfg["data"]["appliance"]
+    train_dataset = cfg["data"]["train_dataset"]
+    stem = f"{model}_{appliance}_{train_dataset}"
+
+    cfg["training"]["checkpoint_name"] = "{model}_{appliance}_{train_dataset}_best.pt"
+    cfg["training"]["loss_plot_path"] = f"figures/{stem}/loss_curve"
+    cfg["training"]["mae_plot_path"] = f"figures/{stem}/mae_curve"
+    cfg["training"]["f1_plot_path"] = f"figures/{stem}/f1_curve"
+    cfg["training"]["on_sample_plot_path"] = f"figures/{stem}/on_period_samples"
+    return cfg
+
+
+def evaluate_run(cfg: dict, *, verbose: bool = True) -> dict:
+    """Load best checkpoint and compute val/test metrics (no training)."""
+    device = resolve_device(cfg)
+    _, val_loader, test_loader, norm_stats = load_data(cfg)
+    model = build_model(cfg, device)
+    save_path = get_checkpoint_path(cfg)
+    on_threshold = get_on_threshold(cfg, cfg["data"]["appliance"])
+    to_watts = lambda tensor: to_watts_tensor(tensor, norm_stats)
+    _, regression_loss_fn, _ = build_training_loss(cfg, norm_stats)
+
+    ckpt = load_checkpoint_model(model, save_path, device)
+    if ckpt is None:
+        raise FileNotFoundError(f"Checkpoint not found: {save_path}")
+
+    model.eval()
+    val_metrics = evaluate_loader(model, val_loader, device, to_watts, on_threshold)
+    test_metrics = evaluate_loader(model, test_loader, device, to_watts, on_threshold)
+
+    test_loss = 0.0
+    with torch.no_grad():
+        for batch in test_loader:
+            x, y = batch[0], batch[1]
+            x = x.to(device)
+            y = y.to(device)
+            pred = model(x)
+            test_loss += regression_loss_fn(pred, y).item() * x.size(0)
+    test_loss /= len(test_loader.dataset)
+
+    result = {
+        "model": cfg["model"]["name"].lower(),
+        "appliance": cfg["data"]["appliance"],
+        "train_dataset": cfg["data"]["train_dataset"],
+        "test_dataset": cfg["data"]["test_dataset"],
+        "val_mae": val_metrics["mae"],
+        "val_sae": val_metrics["sae"],
+        "val_f1": val_metrics["f1"],
+        "test_mae": test_metrics["mae"],
+        "test_sae": test_metrics["sae"],
+        "test_f1": test_metrics["f1"],
+        "test_loss": test_loss,
+        "best_epoch": int(ckpt.get("epoch", 0)),
+        "best_val_loss": float(ckpt.get("best_val_loss", float("nan"))),
+        "checkpoint": str(save_path),
+        "elapsed_s": 0.0,
+        "status": "eval_only",
+    }
+
+    if verbose:
+        print(
+            f"eval {cfg['data']['appliance']} | {cfg['data']['train_dataset']} | "
+            f"test MAE: {result['test_mae']:.2f} W | "
+            f"test SAE: {result['test_sae']:.2f}% | "
+            f"test F1: {result['test_f1']:.4f}"
+        )
+    return result
+
+
+def run_training(cfg: dict, *, plot: bool = True, verbose: bool = True) -> dict:
     device = resolve_device(cfg)
 
     train_loader, val_loader, test_loader, norm_stats = load_data(cfg)
 
-    for name, loader in [("train", train_loader), ("val", val_loader), ("test", test_loader)]:
-        batch = next(iter(loader))
-        x, y = batch[0], batch[1]
-        y_watts = denormalize_appliance(y.numpy(), norm_stats)
-        print(
-            f"{name}: {len(loader.dataset)} windows, "
-            f"x={tuple(x.shape)}, y={tuple(y.shape)}, "
-            f"y_watts min={y_watts.min():.1f}, max={y_watts.max():.1f}"
-        )
+    if verbose:
+        for name, loader in [("train", train_loader), ("val", val_loader), ("test", test_loader)]:
+            batch = next(iter(loader))
+            x, y = batch[0], batch[1]
+            y_watts = denormalize_appliance(y.numpy(), norm_stats)
+            print(
+                f"{name}: {len(loader.dataset)} windows, "
+                f"x={tuple(x.shape)}, y={tuple(y.shape)}, "
+                f"y_watts min={y_watts.min():.1f}, max={y_watts.max():.1f}"
+            )
 
     model = build_model(cfg, device)
-    print(f"model: {cfg['model']['name']}")
-    print(f"normalization ({norm_stats.get('stats_from', 'n/a')}): {norm_stats}")
-    print(f"params: {sum(p.numel() for p in model.parameters()):,}")
+    if verbose:
+        print(f"model: {cfg['model']['name']}")
+        print(f"normalization ({norm_stats.get('stats_from', 'n/a')}): {norm_stats}")
+        print(f"params: {sum(p.numel() for p in model.parameters()):,}")
 
     best_val_loss = float("inf")
     best_epoch = 0
@@ -552,15 +648,17 @@ if __name__ == "__main__":
     on_threshold = get_on_threshold(cfg, cfg["data"]["appliance"])
     to_watts = lambda tensor: to_watts_tensor(tensor, norm_stats)
 
-    print(f"loss: {cfg['training'].get('loss', 'l1')} (curve plots Huber/L1 regression only)")
-    if norm_on_threshold is not None:
-        print(f"F1/train switch threshold: {on_threshold} W ({norm_on_threshold:.4f} normalized)")
+    if verbose:
+        print(f"loss: {cfg['training'].get('loss', 'l1')} (curve plots Huber/L1 regression only)")
+        if norm_on_threshold is not None:
+            print(f"F1/train switch threshold: {on_threshold} W ({norm_on_threshold:.4f} normalized)")
 
     since = time.time()
 
     for epoch in range(1, cfg["training"]["epochs"] + 1):
-        print(f"Epoch {epoch}/{cfg['training']['epochs']}")
-        print("-" * 10)
+        if verbose:
+            print(f"Epoch {epoch}/{cfg['training']['epochs']}")
+            print("-" * 10)
 
         model.train()
         train_loss = 0.0
@@ -594,12 +692,13 @@ if __name__ == "__main__":
         val_maes.append(val_metrics["mae"])
         val_f1s.append(val_metrics["f1"])
 
-        print(f"train loss: {train_loss:.4f} | val loss: {val_loss:.4f}")
-        print(
-            f"val MAE: {val_metrics['mae']:.2f} W | "
-            f"val SAE: {val_metrics['sae']:.2f}% | "
-            f"val F1: {val_metrics['f1']:.4f}"
-        )
+        if verbose:
+            print(f"train loss: {train_loss:.4f} | val loss: {val_loss:.4f}")
+            print(
+                f"val MAE: {val_metrics['mae']:.2f} W | "
+                f"val SAE: {val_metrics['sae']:.2f}% | "
+                f"val F1: {val_metrics['f1']:.4f}"
+            )
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -619,7 +718,12 @@ if __name__ == "__main__":
                 },
                 save_path,
             )
-            print(f"saved best model -> {save_path.name} | epoch {epoch} | val loss: {best_val_loss:.4f}")
+            if verbose:
+                print(f"saved best model -> {save_path.name} | epoch {epoch} | val loss: {best_val_loss:.4f}")
+
+    ckpt = load_checkpoint_model(model, save_path, device)
+    if ckpt is None:
+        raise RuntimeError(f"No checkpoint saved at {save_path}")
 
     model.eval()
     test_loss = 0.0
@@ -634,41 +738,107 @@ if __name__ == "__main__":
     test_metrics = evaluate_loader(model, test_loader, device, to_watts, on_threshold)
 
     elapsed = time.time() - since
-    print("-" * 10)
-    print(f"test loss: {test_loss:.4f}")
-    print(
-        f"test MAE: {test_metrics['mae']:.2f} W | "
-        f"test SAE: {test_metrics['sae']:.2f}% | "
-        f"test F1: {test_metrics['f1']:.4f}"
-    )
-    print(f"best val loss: {best_val_loss:.4f}")
-    print(f"training time: {elapsed:.1f}s")
-    print("=" * 10)
-    print("Best checkpoint summary")
-    print(f"  file: {save_path}")
-    print(f"  appliance: {cfg['data']['appliance']}")
-    print(f"  train dataset: {cfg['data']['train_dataset']}")
-    print(f"  best epoch: {best_epoch} (lowest val Huber loss)")
-    if best_val_metrics:
-        print(f"  val MAE: {best_val_metrics['mae']:.2f} W")
-        print(f"  val SAE: {best_val_metrics['sae']:.2f}%")
-        print(f"  val F1: {best_val_metrics['f1']:.4f}")
-    print("=" * 10)
+    if verbose:
+        print("-" * 10)
+        print(f"test loss: {test_loss:.4f}")
+        print(
+            f"test MAE: {test_metrics['mae']:.2f} W | "
+            f"test SAE: {test_metrics['sae']:.2f}% | "
+            f"test F1: {test_metrics['f1']:.4f}"
+        )
+        print(f"best val loss: {best_val_loss:.4f}")
+        print(f"training time: {elapsed:.1f}s")
+        print("=" * 10)
+        print("Best checkpoint summary")
+        print(f"  file: {save_path}")
+        print(f"  appliance: {cfg['data']['appliance']}")
+        print(f"  train dataset: {cfg['data']['train_dataset']}")
+        print(f"  best epoch: {best_epoch} (lowest val Huber loss)")
+        if best_val_metrics:
+            print(f"  val MAE: {best_val_metrics['mae']:.2f} W")
+            print(f"  val SAE: {best_val_metrics['sae']:.2f}%")
+            print(f"  val F1: {best_val_metrics['f1']:.4f}")
+        print("=" * 10)
 
-    appliance = cfg["data"]["appliance"]
-    model_name = cfg["model"]["name"].upper()
-    figures_dir = CODE_DIR / "figures"
+    if plot:
+        appliance = cfg["data"]["appliance"]
+        model_name = cfg["model"]["name"].upper()
+        plot_loss_curve(train_losses, val_losses, cfg, CODE_DIR / cfg["training"]["loss_plot_path"])
+        plot_epoch_curve(
+            val_maes,
+            cfg,
+            CODE_DIR / cfg["training"]["mae_plot_path"],
+            "MAE (W)",
+            f"{model_name} val MAE ({appliance})",
+        )
+        plot_epoch_curve(
+            val_f1s,
+            cfg,
+            CODE_DIR / cfg["training"]["f1_plot_path"],
+            "F1 score",
+            f"{model_name} val F1 ({appliance})",
+        )
+        if verbose:
+            print(f"loaded best checkpoint (epoch {ckpt.get('epoch')}) for ON-period plots")
+        plot_on_period_samples(model, cfg, norm_stats, device, CODE_DIR / cfg["training"]["on_sample_plot_path"])
 
-    plot_loss_curve(train_losses, val_losses, cfg, CODE_DIR / cfg["training"]["loss_plot_path"])
-    plot_epoch_curve(val_maes, cfg, CODE_DIR / cfg["training"]["mae_plot_path"], "MAE (W)", f"{model_name} val MAE ({appliance})")
-    plot_epoch_curve(val_f1s, cfg, CODE_DIR / cfg["training"]["f1_plot_path"], "F1 score", f"{model_name} val F1 ({appliance})")
+    return {
+        "model": cfg["model"]["name"].lower(),
+        "appliance": cfg["data"]["appliance"],
+        "train_dataset": cfg["data"]["train_dataset"],
+        "test_dataset": cfg["data"]["test_dataset"],
+        "val_mae": best_val_metrics.get("mae", float("nan")),
+        "val_sae": best_val_metrics.get("sae", float("nan")),
+        "val_f1": best_val_metrics.get("f1", float("nan")),
+        "test_mae": test_metrics["mae"],
+        "test_sae": test_metrics["sae"],
+        "test_f1": test_metrics["f1"],
+        "test_loss": test_loss,
+        "best_epoch": best_epoch,
+        "best_val_loss": best_val_loss,
+        "checkpoint": str(save_path),
+        "elapsed_s": elapsed,
+        "status": "ok",
+    }
 
-    ckpt = load_checkpoint_model(model, save_path, device)
-    if ckpt is not None:
-        print(f"loaded best checkpoint (epoch {ckpt.get('epoch')}) for ON-period plots")
-    plot_on_period_samples(model, cfg, norm_stats, device, CODE_DIR / cfg["training"]["on_sample_plot_path"])
 
-    print(f"loss plot saved: {(figures_dir / 'loss_curve.png')}")
-    print(f"mae plot saved: {(figures_dir / 'mae_curve.png')}")
-    print(f"f1 plot saved: {(figures_dir / 'f1_curve.png')}")
-    print(f"on-period plot saved: {(figures_dir / 'on_period_samples.png')}")
+if __name__ == "__main__":
+    import argparse
+    import copy
+    import json
+
+    parser = argparse.ArgumentParser(description="Train one NILM model run from hyperparameter.yaml")
+    parser.add_argument("--config", default=None, help="Path to yaml config (default: hyperparameter.yaml)")
+    parser.add_argument("--appliance", default=None)
+    parser.add_argument("--train-dataset", default=None)
+    parser.add_argument("--test-dataset", default=None)
+    parser.add_argument("--val-dataset", default=None)
+    parser.add_argument("--model", default=None)
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--no-plots", action="store_true")
+    parser.add_argument("--eval-only", action="store_true", help="Load checkpoint and evaluate only")
+    args = parser.parse_args()
+
+    overrides: dict = {}
+    if args.appliance:
+        overrides.setdefault("data", {})["appliance"] = args.appliance
+    if args.train_dataset:
+        overrides.setdefault("data", {})["train_dataset"] = args.train_dataset
+    if args.test_dataset:
+        overrides.setdefault("data", {})["test_dataset"] = args.test_dataset
+    if args.val_dataset:
+        overrides.setdefault("data", {})["val_dataset"] = args.val_dataset
+    if args.model:
+        overrides.setdefault("model", {})["name"] = args.model
+    if args.epochs is not None:
+        overrides.setdefault("training", {})["epochs"] = args.epochs
+
+    cfg = load_config(args.config, overrides)
+    cfg = configure_run_paths(copy.deepcopy(cfg))
+
+    if args.eval_only:
+        result = evaluate_run(cfg)
+    else:
+        result = run_training(cfg, plot=not args.no_plots)
+
+    print(json.dumps(result, indent=2))

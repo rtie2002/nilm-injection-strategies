@@ -16,6 +16,8 @@ checkpoints/*
 !checkpoints/.gitkeep
 figures/*
 !figures/.gitkeep
+results/*
+!results/.gitkeep
 *.pt
 *.pdf
 *.png

@@ -47,7 +47,7 @@ training:
   regression_alpha: 1.0
   switch_beta: 0.1
   save_dir: checkpoints
-  checkpoint_name: "{appliance}_best_epoch.pt"
+  checkpoint_name: "{model}_{appliance}_{train_dataset}_best.pt"
   loss_plot_path: figures/loss_curve
   mae_plot_path: figures/mae_curve
   f1_plot_path: figures/f1_curve

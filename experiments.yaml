@@ -1,0 +1,67 @@
+# Experiment grid for paper tables.
+# Run: python run_experiments.py --suite strategy
+#      python run_experiments.py --suite ratio
+#      python run_experiments.py --suite all
+
+base_config: hyperparameter.yaml
+
+data:
+  val_dataset: val_house1
+  test_dataset: test_house2
+
+appliances:
+  - washingmachine
+  - dishwasher
+  - fridge
+  - microwave
+  - kettle
+
+models:
+  - cnn
+  # - transformer  # enable after model is implemented
+
+# Table: Strategy comparison at rho = 100%
+strategy_comparison:
+  - label: real_only
+    paper_strategy: Real only
+    train_dataset: train_real_only
+    rho: 0
+  - label: d1_full
+    paper_strategy: D1 full
+    train_dataset: train_d1_full_window_append_100
+    rho: 100
+  - label: d2_event
+    paper_strategy: D2 event insertion
+    train_dataset: train_d2_on_event_insertion_100
+    rho: 100
+  - label: d3_balanced
+    paper_strategy: D3 balanced
+    train_dataset: train_d3_balanced_event_insertion_100
+    rho: 100
+
+# Table: D3 ratio sensitivity
+ratio_sensitivity:
+  - label: rho_0
+    paper_strategy: D3 balanced
+    train_dataset: train_real_only
+    rho: 0
+  - label: rho_25
+    paper_strategy: D3 balanced
+    train_dataset: train_d3_balanced_event_insertion_25
+    rho: 25
+  - label: rho_50
+    paper_strategy: D3 balanced
+    train_dataset: train_d3_balanced_event_insertion_50
+    rho: 50
+  - label: rho_100
+    paper_strategy: D3 balanced
+    train_dataset: train_d3_balanced_event_insertion_100
+    rho: 100
+  - label: rho_200
+    paper_strategy: D3 balanced
+    train_dataset: train_d3_balanced_event_insertion_200
+    rho: 200
+
+results:
+  dir: results
+  csv: experiment_results.csv
