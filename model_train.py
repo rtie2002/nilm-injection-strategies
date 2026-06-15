@@ -247,6 +247,14 @@ def resolve_device(cfg) -> torch.device:
     return device
 
 
+def get_checkpoint_path(cfg) -> Path:
+    appliance = cfg["data"]["appliance"]
+    train_cfg = cfg["training"]
+    save_dir = CODE_DIR / train_cfg.get("save_dir", "checkpoints")
+    name_template = train_cfg.get("checkpoint_name", "{appliance}_best_epoch.pt")
+    return save_dir / name_template.format(appliance=appliance)
+
+
 def build_model(cfg, device):
     model_cfg = cfg["model"]
     name = model_cfg["name"].lower()
@@ -458,12 +466,12 @@ def plot_on_period_samples(model, cfg, norm_stats, device, save_stem: Path) -> N
     plt.close(fig)
 
 
-def load_checkpoint_model(model, save_path: Path, device) -> int | None:
+def load_checkpoint_model(model, save_path: Path, device) -> dict | None:
     if not save_path.exists():
         return None
     ckpt = torch.load(save_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
-    return int(ckpt.get("epoch", 0))
+    return ckpt
 
 
 if __name__ == "__main__":
@@ -490,6 +498,8 @@ if __name__ == "__main__":
     print(f"params: {sum(p.numel() for p in model.parameters()):,}")
 
     best_val_loss = float("inf")
+    best_epoch = 0
+    best_val_metrics: dict[str, float] = {}
     train_losses = []
     val_losses = []
     val_maes = []
@@ -498,7 +508,7 @@ if __name__ == "__main__":
     torch.manual_seed(cfg["training"]["seed"])
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg["training"]["lr"])
     loss_fn, regression_loss_fn, norm_on_threshold = build_training_loss(cfg, norm_stats)
-    save_path = CODE_DIR / cfg["training"]["save_path"]
+    save_path = get_checkpoint_path(cfg)
     on_threshold = get_on_threshold(cfg, cfg["data"]["appliance"])
     to_watts = lambda tensor: to_watts_tensor(tensor, norm_stats)
 
@@ -553,18 +563,23 @@ if __name__ == "__main__":
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            best_epoch = epoch
+            best_val_metrics = val_metrics
             save_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save(
                 {
                     "model_state_dict": model.state_dict(),
                     "norm_stats": norm_stats,
                     "best_val_loss": best_val_loss,
+                    "best_val_metrics": best_val_metrics,
                     "epoch": epoch,
+                    "appliance": cfg["data"]["appliance"],
+                    "train_dataset": cfg["data"]["train_dataset"],
                     "cfg": cfg,
                 },
                 save_path,
             )
-            print(f"saved best model | best_val_loss: {best_val_loss:.4f}")
+            print(f"saved best model -> {save_path.name} | epoch {epoch} | val loss: {best_val_loss:.4f}")
 
     model.eval()
     test_loss = 0.0
@@ -588,6 +603,17 @@ if __name__ == "__main__":
     )
     print(f"best val loss: {best_val_loss:.4f}")
     print(f"training time: {elapsed:.1f}s")
+    print("=" * 10)
+    print("Best checkpoint summary")
+    print(f"  file: {save_path}")
+    print(f"  appliance: {cfg['data']['appliance']}")
+    print(f"  train dataset: {cfg['data']['train_dataset']}")
+    print(f"  best epoch: {best_epoch} (lowest val Huber loss)")
+    if best_val_metrics:
+        print(f"  val MAE: {best_val_metrics['mae']:.2f} W")
+        print(f"  val SAE: {best_val_metrics['sae']:.2f}%")
+        print(f"  val F1: {best_val_metrics['f1']:.4f}")
+    print("=" * 10)
 
     appliance = cfg["data"]["appliance"]
     model_name = cfg["model"]["name"].upper()
@@ -597,9 +623,9 @@ if __name__ == "__main__":
     plot_epoch_curve(val_maes, cfg, CODE_DIR / cfg["training"]["mae_plot_path"], "MAE (W)", f"{model_name} val MAE ({appliance})")
     plot_epoch_curve(val_f1s, cfg, CODE_DIR / cfg["training"]["f1_plot_path"], "F1 score", f"{model_name} val F1 ({appliance})")
 
-    best_epoch = load_checkpoint_model(model, save_path, device)
-    if best_epoch is not None:
-        print(f"loaded best checkpoint from epoch {best_epoch} for ON-period plots")
+    ckpt = load_checkpoint_model(model, save_path, device)
+    if ckpt is not None:
+        print(f"loaded best checkpoint (epoch {ckpt.get('epoch')}) for ON-period plots")
     plot_on_period_samples(model, cfg, norm_stats, device, CODE_DIR / cfg["training"]["on_sample_plot_path"])
 
     print(f"loss plot saved: {(figures_dir / 'loss_curve.png')}")
