@@ -7,9 +7,10 @@ venv/
 .env
 
 # Large data files (copy separately to other machines)
-
 *.npz
 *.npy
+injection_strategy/datasets/**/*.csv
+data/**/*.csv
 
 # Training outputs (recreated when you train; .gitkeep keeps folder structure)
 checkpoints/*
