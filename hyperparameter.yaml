@@ -16,26 +16,16 @@ dataloader:
   shuffle_val: false
   shuffle_test: false
 
-# Z-score: one mean/std for aggregate input, one mean/std per appliance target
+# Z-score: mean/std computed from train_dataset (same stats for normalize + denormalize)
 normalization:
   method: zscore
-  aggregate_mean: 522
-  aggregate_std: 814
-  kettle:
-    mean: 16.29
-    std: 171.08
-  microwave:
-    mean: 500
-    std: 800
-  fridge:
-    mean: 200
-    std: 400
-  dishwasher:
-    mean: 700
-    std: 1000
-  washingmachine:
-    mean: 400
-    std: 700
+  stats_from: train
+  # Optional fixed stats (only if stats_from: yaml)
+  # aggregate_mean: 522
+  # aggregate_std: 814
+  # kettle:
+  #   mean: 16.29
+  #   std: 171.08
 
 # Model (code/model/)
 model:

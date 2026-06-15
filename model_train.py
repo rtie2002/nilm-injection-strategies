@@ -51,26 +51,66 @@ def load_arrays(appliance, dataset_name, data_dir, window_len):
     return aggregate, appliance_power, on_off
 
 
-def get_norm_stats(norm_cfg, appliance):
+def _safe_std(values: np.ndarray) -> float:
+    std = float(np.std(values))
+    return std if std > 1e-6 else 1.0
+
+
+def compute_norm_stats_from_train(
+    train_agg: np.ndarray,
+    train_app: np.ndarray,
+    norm_cfg: dict,
+) -> dict:
+    """Z-score stats from training windows (watts). Same stats used to denormalize for metrics."""
+    return {
+        "method": "zscore",
+        "stats_from": "train",
+        "aggregate_mean": float(np.mean(train_agg)),
+        "aggregate_std": _safe_std(train_agg),
+        "appliance_mean": float(np.mean(train_app)),
+        "appliance_std": _safe_std(train_app),
+    }
+
+
+def get_norm_stats_from_yaml(norm_cfg: dict, appliance: str) -> dict:
+    if appliance not in norm_cfg:
+        raise KeyError(f"No normalization stats for appliance: {appliance}")
+
+    app_stats = norm_cfg[appliance]
+    return {
+        "method": "zscore",
+        "stats_from": "yaml",
+        "aggregate_mean": float(norm_cfg["aggregate_mean"]),
+        "aggregate_std": float(norm_cfg["aggregate_std"]),
+        "appliance_mean": float(app_stats["mean"]),
+        "appliance_std": float(app_stats["std"]),
+    }
+
+
+def get_norm_stats(
+    norm_cfg: dict,
+    appliance: str,
+    train_agg: np.ndarray | None = None,
+    train_app: np.ndarray | None = None,
+) -> dict:
     method = norm_cfg["method"].lower()
 
     if method == "none":
         return {"method": "none"}
 
-    if method == "zscore":
-        if appliance not in norm_cfg:
-            raise KeyError(f"No normalization stats for appliance: {appliance}")
+    if method != "zscore":
+        raise ValueError(f"Unknown normalization.method: {method}")
 
-        app_stats = norm_cfg[appliance]
-        return {
-            "method": "zscore",
-            "aggregate_mean": float(norm_cfg["aggregate_mean"]),
-            "aggregate_std": float(norm_cfg["aggregate_std"]),
-            "appliance_mean": float(app_stats["mean"]),
-            "appliance_std": float(app_stats["std"]),
-        }
+    stats_from = str(norm_cfg.get("stats_from", "train")).lower()
+    if stats_from == "train":
+        if train_agg is None or train_app is None:
+            raise ValueError("train arrays required when normalization.stats_from is 'train'")
+        return compute_norm_stats_from_train(train_agg, train_app, norm_cfg)
 
-    raise ValueError(f"Unknown normalization.method: {method}")
+    if stats_from == "yaml":
+        return get_norm_stats_from_yaml(norm_cfg, appliance)
+
+    raise ValueError(f"Unknown normalization.stats_from: {stats_from} (use train or yaml)")
 
 
 def normalize(aggregate, appliance, stats):
@@ -169,7 +209,7 @@ def load_data(cfg):
     val_agg, val_app, val_on = load_arrays(appliance, data["val_dataset"], data_dir, window_len)
     test_agg, test_app, test_on = load_arrays(appliance, data["test_dataset"], data_dir, window_len)
 
-    norm_stats = get_norm_stats(cfg["normalization"], appliance)
+    norm_stats = get_norm_stats(cfg["normalization"], appliance, train_agg, train_app)
     train_agg, train_app = normalize(train_agg, train_app, norm_stats)
     val_agg, val_app = normalize(val_agg, val_app, norm_stats)
     test_agg, test_app = normalize(test_agg, test_app, norm_stats)
@@ -494,7 +534,7 @@ if __name__ == "__main__":
 
     model = build_model(cfg, device)
     print(f"model: {cfg['model']['name']}")
-    print(f"normalization: {norm_stats}")
+    print(f"normalization ({norm_stats.get('stats_from', 'n/a')}): {norm_stats}")
     print(f"params: {sum(p.numel() for p in model.parameters()):,}")
 
     best_val_loss = float("inf")
