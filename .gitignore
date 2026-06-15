@@ -20,6 +20,14 @@ figures/*
 results/*
 !results/.gitkeep
 *.pt
+*.h5
+
+# Geng et al. reference repo (DiffusionModel_NILM) — code only, not data/weights
+DiffusionModel_NILM/OUTPUT/
+DiffusionModel_NILM/.Checkpoints/
+DiffusionModel_NILM/Data/datasets/*.csv
+DiffusionModel_NILM/**/created_data/**/*.csv
+DiffusionModel_NILM/generatedData/**/*.csv
 *.pdf
 *.png
 

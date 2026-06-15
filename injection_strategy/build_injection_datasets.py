@@ -11,6 +11,7 @@ Methods:
     D1: Full-window append
     D2: ON-event insertion
     D3: Balanced event insertion
+    D4: Geng-style timestep concat + shuffle (full timeline, then window)
 
 ______________________________________________________
 Step (1)
@@ -130,6 +131,43 @@ def load_real_windows(
 # Load synthetic appliance data.
 # Synthetic data contains only Y_s, time features, and on_off.
 # ______________________________________________________
+def load_real_timesteps(csv_path: Path, appliance: str, threshold: float) -> pd.DataFrame:
+    df = pd.read_csv(csv_path)
+    required = ["aggregate", appliance] + TIME_COLUMNS
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"{csv_path.name} missing columns: {missing}")
+    if "on_off" not in df.columns:
+        df["on_off"] = (df[appliance] >= threshold).astype(np.int8)
+    return df
+
+
+def load_synthetic_timesteps(csv_path: Path, appliance: str, threshold: float) -> pd.DataFrame:
+    df = pd.read_csv(csv_path)
+    required = [appliance] + TIME_COLUMNS
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"{csv_path.name} missing columns: {missing}")
+    if "on_off" not in df.columns:
+        df["on_off"] = (df[appliance] >= threshold).astype(np.int8)
+    return df
+
+
+def timesteps_to_windows(df: pd.DataFrame, appliance: str, window_len: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    n = (len(df) // window_len) * window_len
+    if n < window_len:
+        raise ValueError(f"Need at least {window_len} timesteps, got {len(df)}")
+    if n < len(df):
+        df = df.iloc[:n].copy()
+
+    aggregate = df["aggregate"].to_numpy(dtype=np.float32).reshape(-1, window_len)
+    appliance_power = df[appliance].to_numpy(dtype=np.float32).reshape(-1, window_len)
+    time_features = df[TIME_COLUMNS].to_numpy(dtype=np.float32).reshape(-1, window_len, len(TIME_COLUMNS))
+    state = df["on_off"].to_numpy(dtype=np.int8).reshape(-1, window_len)
+    x_rows = np.concatenate([aggregate[:, :, None], time_features], axis=2).astype(np.float32)
+    return x_rows, appliance_power, state
+
+
 def load_synthetic_sequence(csv_path: Path, appliance: str, threshold: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     df = pd.read_csv(csv_path)
     required = [appliance] + TIME_COLUMNS
@@ -384,6 +422,82 @@ def save_event_metadata(path: Path, event_meta: pd.DataFrame) -> None:
     event_meta.to_csv(path, index=False)
 
 
+# ______________________________________________________
+# Step (H2)
+# D4: Geng-style timestep mix (paper Sec. 3.2 + 4.1).
+# 1) Build synthetic rows with aggregate = sum of all five synthetic appliance powers.
+# 2) Concatenate real timesteps + synthetic timesteps (not pre-built windows).
+# 3) Shuffle rows, then cut fixed-length windows for the current CSV loader.
+# ______________________________________________________
+def load_geng_synthetic_timesteps(
+    synthetic_dir: Path,
+    appliance: str,
+    n_syn: int,
+    threshold: float,
+) -> pd.DataFrame:
+    power_sum = np.zeros(n_syn, dtype=np.float32)
+    template = None
+    for app in APPLIANCES:
+        path = synthetic_dir / f"{app}_synthetic.csv"
+        df = pd.read_csv(path, nrows=n_syn)
+        if len(df) < n_syn:
+            raise ValueError(f"{path.name} has {len(df)} rows, need {n_syn}")
+        power_sum += df[app].to_numpy(dtype=np.float32)
+        if app == appliance:
+            template = df
+
+    if template is None:
+        raise ValueError(f"Missing synthetic template for appliance: {appliance}")
+
+    out = pd.DataFrame({
+        "aggregate": power_sum,
+        appliance: template[appliance].to_numpy(dtype=np.float32),
+    })
+    for col in TIME_COLUMNS:
+        out[col] = template[col].to_numpy(dtype=np.float32)
+    if "on_off" in template.columns:
+        out["on_off"] = template["on_off"].to_numpy(dtype=np.int8)
+    else:
+        out["on_off"] = (out[appliance] >= threshold).astype(np.int8)
+    return out
+
+
+def make_geng_timestep_mix(
+    rng: np.random.Generator,
+    real_df: pd.DataFrame,
+    synthetic_dir: Path,
+    appliance: str,
+    n_real: int,
+    n_syn: int,
+    window_len: int,
+    threshold: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    if n_real > len(real_df):
+        raise ValueError(f"Requested {n_real} real timesteps but only {len(real_df)} available")
+
+    real_part = real_df.iloc[:n_real].copy()
+    synth_rows = load_geng_synthetic_timesteps(synthetic_dir, appliance, n_syn, threshold)
+
+    combined = pd.concat([real_part, synth_rows], ignore_index=True)
+    perm = rng.permutation(len(combined))
+    combined = combined.iloc[perm].reset_index(drop=True)
+
+    usable = (len(combined) // window_len) * window_len
+    dropped = len(combined) - usable
+    if dropped:
+        combined = combined.iloc[:usable].copy()
+
+    X, y, state = timesteps_to_windows(combined, appliance, window_len)
+    meta = {
+        "real_timesteps": n_real,
+        "synthetic_timesteps": n_syn,
+        "combined_timesteps": len(combined),
+        "dropped_tail_timesteps": dropped,
+        "windows": len(X),
+    }
+    return X, y, state, meta
+
+
 def combine(real_X: np.ndarray, real_y: np.ndarray, real_state: np.ndarray, syn_X: np.ndarray, syn_y: np.ndarray, syn_state: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     return (
         np.concatenate([real_X, syn_X], axis=0),
@@ -410,6 +524,8 @@ def build_for_appliance(args: argparse.Namespace, appliance: str) -> None:
     X_val, y_val, _, state_val = load_real_windows(val_csv, appliance, args.window_len, args.stride, threshold)
     X_test_h1, y_test_h1, _, state_test_h1 = load_real_windows(test_csv, appliance, args.window_len, args.stride, threshold)
     X_test_h2, y_test_h2, _, state_test_h2 = load_real_windows(house2_csv, appliance, args.window_len, args.stride, threshold)
+
+    real_timesteps = load_real_timesteps(train_csv, appliance, threshold)
 
     y_synth_windows, _, state_synth_windows = load_synthetic_windows(synth_csv, appliance, args.window_len, threshold)
     y_synth_seq, _, state_synth_seq = load_synthetic_sequence(synth_csv, appliance, threshold)
@@ -446,6 +562,24 @@ def build_for_appliance(args: argparse.Namespace, appliance: str) -> None:
     save_dataset(split_dir / "train_d3_balanced_event_insertion_100.csv", X_aug, y_aug, state_aug, appliance)
     save_event_metadata(split_dir / "train_d3_balanced_event_insertion_100_event_metadata.csv", event_meta)
     print(f"  D3 balanced event insertion 100: X={X_aug.shape}, synthetic ON-window rate={on_window_rate(state_bal):.3f}")
+
+    X_geng, y_geng, state_geng, geng_meta = make_geng_timestep_mix(
+        rng,
+        real_timesteps,
+        args.synthetic_dir,
+        appliance,
+        n_real=args.geng_real_timesteps,
+        n_syn=args.geng_syn_timesteps,
+        window_len=args.window_len,
+        threshold=threshold,
+    )
+    save_dataset(split_dir / "train_d4_geng_timestep_mix_100.csv", X_geng, y_geng, state_geng, appliance)
+    print(
+        f"  D4 Geng timestep mix 100: X={X_geng.shape}, "
+        f"real={geng_meta['real_timesteps']} syn={geng_meta['synthetic_timesteps']} "
+        f"timesteps, dropped_tail={geng_meta['dropped_tail_timesteps']}, "
+        f"ON-window rate={on_window_rate(state_geng):.3f}"
+    )
 
     # Experiment 2: ratio sensitivity for D3 only.
     for ratio in args.ratios:
@@ -504,6 +638,18 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--ratios", type=float, nargs="+", default=[0.25, 0.50, 1.00, 2.00])
     parser.add_argument("--min-event-len", type=int, default=1)
+    parser.add_argument(
+        "--geng-real-timesteps",
+        type=int,
+        default=100_000,
+        help="D4: real timesteps before mix (Geng 100k+100k at 1-min resolution)",
+    )
+    parser.add_argument(
+        "--geng-syn-timesteps",
+        type=int,
+        default=100_000,
+        help="D4: synthetic timesteps before mix",
+    )
     parser.add_argument("--threshold", action="append", default=[], help="Fallback threshold, e.g. --threshold kettle=500")
     args = parser.parse_args()
     args.thresholds = parse_thresholds(args.threshold)

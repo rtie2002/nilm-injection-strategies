@@ -38,6 +38,10 @@ strategy_comparison:
     paper_strategy: D3 balanced
     train_dataset: train_d3_balanced_event_insertion_100
     rho: 100
+  - label: d4_geng
+    paper_strategy: Geng 100k+100k
+    train_dataset: train_d4_geng_timestep_mix_100
+    rho: 100
 
 # Table: D3 ratio sensitivity
 ratio_sensitivity:
