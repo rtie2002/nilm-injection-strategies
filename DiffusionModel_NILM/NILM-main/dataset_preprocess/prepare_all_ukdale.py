@@ -13,30 +13,35 @@ Derived from ukdale_processing.py. Automates:
   House 1 (cross-household test only):
     - {appliance}_test_home1Small_.csv  full house-1 timeline → Tables 6, 9
 
-Outputs are written under:
+Outputs are written under (relative to this script):
   created_data/UK_DALE/{appliance}/
 
-Raw .dat layout expected:
+Raw .dat layout expected (relative to this script):
   UK_DALE/house_1/channel_1.dat  (mains)
   UK_DALE/house_2/channel_1.dat  (mains)
   ... appliance channels per PARAMS below
 
-Usage (from dataset_preprocess/):
+Usage (can run from any working directory):
   python prepare_all_ukdale.py
+  python path/to/prepare_all_ukdale.py
   python prepare_all_ukdale.py --appliances kettle microwave
-  python prepare_all_ukdale.py --data_dir UK_DALE/ --dry_run
+  python prepare_all_ukdale.py --data_dir UK_DALE --dry_run
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import time
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+# Paths relative to this script file (portable across machines / cwd).
+SCRIPT_DIR = Path(__file__).resolve().parent
+REL_DATA_DIR = "UK_DALE"
+REL_SAVE_DIR = "created_data/UK_DALE"
 
 # ---------------------------------------------------------------------------
 # Constants (from ukdale_processing.py / paper Table 1)
@@ -87,14 +92,31 @@ PARAMS = {
 }
 
 
-def _ensure_trailing_slash(path: str) -> str:
-    return path if path.endswith(("/", "\\")) else path + "/"
+def _resolve_dir(path: str | Path) -> Path:
+    """Relative paths are resolved from SCRIPT_DIR, not the shell cwd."""
+    p = Path(path)
+    if not p.is_absolute():
+        p = SCRIPT_DIR / p
+    return p.resolve()
 
 
-def load_dat_channel(data_dir: str, house: int, channel: int) -> pd.DataFrame:
-    path = Path(data_dir) / f"house_{house}" / f"channel_{channel}.dat"
+def _rel_to_script(path: Path) -> str:
+    """Display path relative to script dir when possible."""
+    try:
+        return str(path.relative_to(SCRIPT_DIR))
+    except ValueError:
+        return str(path)
+
+
+def load_dat_channel(data_dir: Path, house: int, channel: int) -> pd.DataFrame:
+    path = data_dir / f"house_{house}" / f"channel_{channel}.dat"
     if not path.exists():
-        raise FileNotFoundError(f"Missing UK-DALE file: {path}")
+        raise FileNotFoundError(
+            f"Missing UK-DALE file: {_rel_to_script(path)}\n"
+            f"  Expected: {{data_dir}}/house_{house}/channel_{channel}.dat\n"
+            f"  data_dir: {_rel_to_script(data_dir)}\n"
+            f"  Put .dat files next to this script under: {REL_DATA_DIR}/house_{house}/"
+        )
     return pd.read_table(
         path,
         sep=r"\s+",
@@ -105,7 +127,7 @@ def load_dat_channel(data_dir: str, house: int, channel: int) -> pd.DataFrame:
 
 
 def align_and_resample(
-    data_dir: str,
+    data_dir: Path,
     house: int,
     appliance: str,
     sample_seconds: int = SAMPLE_SECONDS,
@@ -183,8 +205,8 @@ def crop_label(n_rows: int) -> str:
 
 def process_appliance(
     appliance: str,
-    data_dir: str,
-    save_root: str,
+    data_dir: Path,
+    save_root: Path,
     validation_percent: float,
     test_percent: float,
     train_crops: tuple[int, ...],
@@ -244,14 +266,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data_dir",
         type=str,
-        default="UK_DALE/",
-        help="Directory containing house_1/, house_2/ with .dat files",
+        default=REL_DATA_DIR,
+        help=f"Input .dat root, relative to script dir (default: {REL_DATA_DIR})",
     )
     parser.add_argument(
         "--save_path",
         type=str,
-        default="created_data/UK_DALE/",
-        help="Root output directory (per-appliance subfolders created)",
+        default=REL_SAVE_DIR,
+        help=f"Output CSV root, relative to script dir (default: {REL_SAVE_DIR})",
     )
     parser.add_argument(
         "--appliances",
@@ -306,16 +328,24 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    data_dir = _ensure_trailing_slash(args.data_dir)
-    save_path = _ensure_trailing_slash(args.save_path)
+    data_dir = _resolve_dir(args.data_dir)
+    save_path = _resolve_dir(args.save_path)
+
+    if not data_dir.is_dir():
+        raise FileNotFoundError(
+            f"data_dir not found: {_rel_to_script(data_dir)}\n"
+            f"  Put UK-DALE .dat files under: {REL_DATA_DIR}/house_2/channel_1.dat\n"
+            f"  (paths are relative to script: {_rel_to_script(SCRIPT_DIR)})"
+        )
 
     if args.validation_percent + args.testing_percent >= 100:
         raise ValueError("validation_percent + testing_percent must be < 100")
 
     t0 = time.time()
     print("UK-DALE batch preparation")
-    print(f"  data_dir:  {data_dir}")
-    print(f"  save_path: {save_path}")
+    print(f"  script dir: {_rel_to_script(SCRIPT_DIR)}")
+    print(f"  data_dir:   {_rel_to_script(data_dir)}")
+    print(f"  save_path:  {_rel_to_script(save_path)}")
     print(f"  appliances: {args.appliances}")
     print(
         f"  split: {100 - args.validation_percent - args.testing_percent}:"
@@ -338,13 +368,16 @@ def main() -> None:
         )
         all_manifests.append(manifest)
 
-    manifest_path = Path(save_path) / "preprocessing_manifest.json"
+    manifest_path = save_path / "preprocessing_manifest.json"
     if not args.dry_run:
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         with open(manifest_path, "w", encoding="utf-8") as f:
             json.dump(
                 {
                     "paper": "Geng et al. Energy 2025",
+                    "script_dir": _rel_to_script(SCRIPT_DIR),
+                    "data_dir": _rel_to_script(data_dir),
+                    "save_path": _rel_to_script(save_path),
                     "sample_seconds": SAMPLE_SECONDS,
                     "aggregate_mean": args.aggregate_mean,
                     "aggregate_std": args.aggregate_std,
@@ -353,7 +386,7 @@ def main() -> None:
                 f,
                 indent=2,
             )
-        print(f"\nManifest: {manifest_path}")
+        print(f"\nManifest: {_rel_to_script(manifest_path)}")
 
     elapsed = (time.time() - t0) / 60
     print(f"\nDone in {elapsed:.2f} min.")
