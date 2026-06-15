@@ -362,13 +362,8 @@ def make_event_inserted_samples(
 
 # ______________________________________________________
 # Step (H)
-# Save NPZ and readable CSV.
+# Save readable CSV (training code loads CSV only).
 # ______________________________________________________
-def save_npz(path: Path, X: np.ndarray, y: np.ndarray, state: np.ndarray, meta: Dict[str, str | int | float]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(path, X=X.astype(np.float32), y=y.astype(np.float32), state=state.astype(np.int8), **meta)
-
-
 def save_csv_like_original(path: Path, X: np.ndarray, y: np.ndarray, state: np.ndarray, appliance: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     aggregate = X[:, :, 0].reshape(-1)
@@ -379,9 +374,9 @@ def save_csv_like_original(path: Path, X: np.ndarray, y: np.ndarray, state: np.n
     df.to_csv(path, index=False)
 
 
-def save_dataset(path: Path, X: np.ndarray, y: np.ndarray, state: np.ndarray, meta: Dict[str, str | int | float], appliance: str) -> None:
-    save_npz(path, X, y, state, meta)
-    save_csv_like_original(path.with_suffix(".csv"), X, y, state, appliance)
+def save_dataset(path: Path, X: np.ndarray, y: np.ndarray, state: np.ndarray, appliance: str) -> None:
+    csv_path = path if path.suffix == ".csv" else path.with_suffix(".csv")
+    save_csv_like_original(csv_path, X, y, state, appliance)
 
 
 def save_event_metadata(path: Path, event_meta: pd.DataFrame) -> None:
@@ -427,28 +422,28 @@ def build_for_appliance(args: argparse.Namespace, appliance: str) -> None:
     print(f"  real ON-window rate={on_window_rate(state_train):.3f}")
     print(f"  full synthetic ON-window rate={on_window_rate(state_synth_windows):.3f}")
 
-    save_dataset(split_dir / "val_house1.npz", X_val, y_val, state_val, {"appliance": appliance, "split": "val_house1"}, appliance)
-    save_dataset(split_dir / "test_house1.npz", X_test_h1, y_test_h1, state_test_h1, {"appliance": appliance, "split": "test_house1"}, appliance)
-    save_dataset(split_dir / "test_house2.npz", X_test_h2, y_test_h2, state_test_h2, {"appliance": appliance, "split": "test_house2"}, appliance)
-    save_dataset(split_dir / "train_real_only.npz", X_train, y_train, state_train, {"appliance": appliance, "strategy": "real_only", "ratio": 0.0}, appliance)
+    save_dataset(split_dir / "val_house1.csv", X_val, y_val, state_val, appliance)
+    save_dataset(split_dir / "test_house1.csv", X_test_h1, y_test_h1, state_test_h1, appliance)
+    save_dataset(split_dir / "test_house2.csv", X_test_h2, y_test_h2, state_test_h2, appliance)
+    save_dataset(split_dir / "train_real_only.csv", X_train, y_train, state_train, appliance)
 
     # Experiment 1: D1/D2/D3 at rho = 100%.
     n_syn = n_real
 
     X_full, y_full, state_full = make_full_window_samples(rng, train_pair, y_synth_windows, state_synth_windows, n_syn)
     X_aug, y_aug, state_aug = combine(X_train, y_train, state_train, X_full, y_full, state_full)
-    save_dataset(split_dir / "train_d1_full_window_append_100.npz", X_aug, y_aug, state_aug, {"appliance": appliance, "strategy": "d1_full_window_append", "ratio": 1.0}, appliance)
+    save_dataset(split_dir / "train_d1_full_window_append_100.csv", X_aug, y_aug, state_aug, appliance)
     print(f"  D1 full-window append 100: X={X_aug.shape}, synthetic ON-window rate={on_window_rate(state_full):.3f}")
 
     X_event, y_event, state_event, event_meta = make_event_inserted_samples(rng, train_pair, state_train, events, n_syn)
     X_aug, y_aug, state_aug = combine(X_train, y_train, state_train, X_event, y_event, state_event)
-    save_dataset(split_dir / "train_d2_on_event_insertion_100.npz", X_aug, y_aug, state_aug, {"appliance": appliance, "strategy": "d2_on_event_insertion", "ratio": 1.0}, appliance)
+    save_dataset(split_dir / "train_d2_on_event_insertion_100.csv", X_aug, y_aug, state_aug, appliance)
     save_event_metadata(split_dir / "train_d2_on_event_insertion_100_event_metadata.csv", event_meta)
     print(f"  D2 ON-event insertion 100: X={X_aug.shape}, synthetic ON-window rate={on_window_rate(state_event):.3f}")
 
     X_bal, y_bal, state_bal, event_meta = make_balanced_samples(rng, train_pair, state_train, y_synth_windows, state_synth_windows, events, n_syn)
     X_aug, y_aug, state_aug = combine(X_train, y_train, state_train, X_bal, y_bal, state_bal)
-    save_dataset(split_dir / "train_d3_balanced_event_insertion_100.npz", X_aug, y_aug, state_aug, {"appliance": appliance, "strategy": "d3_balanced_event_insertion", "ratio": 1.0}, appliance)
+    save_dataset(split_dir / "train_d3_balanced_event_insertion_100.csv", X_aug, y_aug, state_aug, appliance)
     save_event_metadata(split_dir / "train_d3_balanced_event_insertion_100_event_metadata.csv", event_meta)
     print(f"  D3 balanced event insertion 100: X={X_aug.shape}, synthetic ON-window rate={on_window_rate(state_bal):.3f}")
 
@@ -460,7 +455,7 @@ def build_for_appliance(args: argparse.Namespace, appliance: str) -> None:
         X_bal, y_bal, state_bal, event_meta = make_balanced_samples(rng, train_pair, state_train, y_synth_windows, state_synth_windows, events, n_syn)
         X_aug, y_aug, state_aug = combine(X_train, y_train, state_train, X_bal, y_bal, state_bal)
         pct = int(round(ratio * 100))
-        save_dataset(split_dir / f"train_d3_balanced_event_insertion_{pct}.npz", X_aug, y_aug, state_aug, {"appliance": appliance, "strategy": "d3_balanced_event_insertion", "ratio": ratio}, appliance)
+        save_dataset(split_dir / f"train_d3_balanced_event_insertion_{pct}.csv", X_aug, y_aug, state_aug, appliance)
         save_event_metadata(split_dir / f"train_d3_balanced_event_insertion_{pct}_event_metadata.csv", event_meta)
         print(f"  D3 balanced event insertion {pct}: X={X_aug.shape}, synthetic ON-window rate={on_window_rate(state_bal):.3f}")
 

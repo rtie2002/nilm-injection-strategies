@@ -30,23 +30,29 @@ class NILMDataset(Dataset):
 
 
 def load_arrays(appliance, dataset_name, data_dir, window_len):
-    path_npz = data_dir / appliance / f"{dataset_name}.npz"
     path_csv = data_dir / appliance / f"{dataset_name}.csv"
-    path = path_npz if path_npz.exists() else path_csv
-    if not path.exists():
-        raise FileNotFoundError(f"Dataset not found: {path_npz} or {path_csv}")
+    if not path_csv.exists():
+        raise FileNotFoundError(
+            f"Dataset not found: {path_csv}. "
+            f"Rebuild with: python injection_strategy/build_injection_datasets.py "
+            f"--window-len {window_len} --stride {window_len}"
+        )
 
-    if path.suffix == ".npz":
-        data = np.load(path)
-        aggregate = data["X"][:, :, 0]
-        appliance_power = data["y"]
-        on_off = data["state"] if "state" in data else None
-    else:
-        df = pd.read_csv(path)
-        n = len(df) // window_len
-        aggregate = df["aggregate"].to_numpy(dtype=np.float32).reshape(n, window_len)
-        appliance_power = df[appliance].to_numpy(dtype=np.float32).reshape(n, window_len)
-        on_off = df["on_off"].to_numpy(dtype=np.int8).reshape(n, window_len) if "on_off" in df.columns else None
+    df = pd.read_csv(path_csv)
+    nrows = len(df)
+    if nrows % window_len != 0:
+        raise ValueError(
+            f"{path_csv.name} has {nrows} rows, not divisible by window_len={window_len}. "
+            f"Delete and rebuild datasets at window_len={window_len}."
+        )
+    n = nrows // window_len
+    aggregate = df["aggregate"].to_numpy(dtype=np.float32).reshape(n, window_len)
+    appliance_power = df[appliance].to_numpy(dtype=np.float32).reshape(n, window_len)
+    on_off = (
+        df["on_off"].to_numpy(dtype=np.int8).reshape(n, window_len)
+        if "on_off" in df.columns
+        else None
+    )
 
     return aggregate, appliance_power, on_off
 
