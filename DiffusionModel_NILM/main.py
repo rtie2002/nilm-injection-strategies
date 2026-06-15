@@ -34,6 +34,8 @@ def parse_args():
     parser.add_argument('--train', action='store_true', default=False, help='Train or Test.')
     parser.add_argument('--sample', type=int, default=0)
     parser.add_argument('--milestone', type=int, default=1000)
+    parser.add_argument('opts', nargs='*', default=None,
+                        help='Optional config overrides, e.g. solver.max_epochs 100')
 
     args = parser.parse_args()
     args.save_dir = os.path.join(args.output, f'{args.name}')
