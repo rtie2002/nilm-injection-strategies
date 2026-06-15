@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Large data files (copy separately to other machines)
+*.csv
+*.npz
+*.npy
+
+# Training outputs (recreated when you train; .gitkeep keeps folder structure)
+checkpoints/*
+!checkpoints/.gitkeep
+figures/*
+!figures/.gitkeep
+*.pt
+*.pdf
+*.png
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+.Desktop

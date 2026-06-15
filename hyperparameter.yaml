@@ -1,0 +1,71 @@
+# Data
+data:
+  data_dir: injection_strategy/datasets
+  window_len: 512
+  appliance: washingmachine
+  train_dataset: train_real_only
+  val_dataset: val_house1
+  test_dataset: test_house1
+
+# DataLoader
+dataloader:
+  batch_size: 32
+  num_workers: 0
+  pin_memory: true
+  shuffle_train: true
+  shuffle_val: false
+  shuffle_test: false
+
+# Z-score: one mean/std for aggregate input, one mean/std per appliance target
+normalization:
+  method: zscore
+  aggregate_mean: 522
+  aggregate_std: 814
+  kettle:
+    mean: 16.29
+    std: 171.08
+  microwave:
+    mean: 500
+    std: 800
+  fridge:
+    mean: 200
+    std: 400
+  dishwasher:
+    mean: 700
+    std: 1000
+  washingmachine:
+    mean: 400
+    std: 700
+
+# Model (code/model/)
+model:
+  name: cnn
+  input_channels: 1
+  hidden_channels: 64
+  output_channels: 1
+
+# Training (combined = Huber regression + ON/OFF switch penalty)
+training:
+  epochs: 50
+  lr: 0.001
+  seed: 42
+  loss: combined
+  huber_delta: 0.5
+  regression_alpha: 1.0
+  switch_beta: 0.1
+  save_path: checkpoints/model.pt
+  loss_plot_path: figures/loss_curve
+  mae_plot_path: figures/mae_curve
+  f1_plot_path: figures/f1_curve
+  on_sample_plot_path: figures/on_period_samples
+  n_on_samples: 3
+  on_sample_split: val
+
+# Evaluation metrics (MAE, SAE, F1) — F1 binarizes denormalized watts at threshold
+metrics:
+  on_thresholds:
+    kettle: 200
+    microwave: 200
+    fridge: 50
+    dishwasher: 10
+    washingmachine: 20
