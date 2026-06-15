@@ -7,7 +7,7 @@ venv/
 .env
 
 # Large data files (copy separately to other machines)
-*.csv
+
 *.npz
 *.npy
 
