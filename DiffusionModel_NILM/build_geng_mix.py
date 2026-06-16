@@ -7,6 +7,12 @@ Paper mix scenarios (origin CSVs come from prepare_all_ukdale.py only):
   100k + 100k  -> UK_DALECombined{app}_file10.csv (built here)
   200k + 200k  -> UK_DALECombined{app}_file20.csv (built here)
 
+Also writes labeled inspection CSV (watts, row order = concat only; NILM shuffles at train time):
+  UK_DALECombined{app}_file{label}_labeled.csv
+  source: 0 = real (first block), 1 = synthetic (second block)
+
+Visualize: python ../data/geng_mix_visualize.py <labeled_csv>
+
 Val/test CSVs also come from prepare_all_ukdale.py (unchanged).
 
 One-click (all appliances, all mix scenarios):
@@ -293,11 +299,36 @@ def load_real_watts(
     )
 
 
-def geng_mix(real_watts: pd.DataFrame, syn_watts: pd.DataFrame, seed: int) -> pd.DataFrame:
-    combined = pd.concat([real_watts, syn_watts], ignore_index=True)
-    rng = np.random.default_rng(seed)
-    perm = rng.permutation(len(combined))
-    return combined.iloc[perm].reset_index(drop=True)
+def geng_mix_labeled(
+    real_watts: pd.DataFrame,
+    syn_watts: pd.DataFrame,
+    appliance: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Geng D_mix: concat real block then syn block (no row shuffle here).
+
+    EasyS2S / ChunkS2S_Slider uses shuffle=True at train time — same as Geng original code.
+    source: 0=real, 1=synthetic.
+    """
+    real_block = real_watts.copy()
+    real_block["source"] = 0
+    syn_block = syn_watts.copy()
+    syn_block["source"] = 1
+    labeled = pd.concat([real_block, syn_block], ignore_index=True)
+    mixed_watts = labeled[["aggregate", appliance]].copy()
+    return mixed_watts, labeled
+
+
+def save_labeled_mix_csv(df_labeled: pd.DataFrame, appliance: str, path: Path) -> None:
+    """Watts + source column for visualization (0=real, 1=synthetic)."""
+    out = df_labeled[["aggregate", appliance, "source"]].copy()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(path, index=False)
+    n_real = int((out["source"] == 0).sum())
+    n_syn = int((out["source"] == 1).sum())
+    print(
+        f"  labeled CSV: {_rel(path)} ({len(out):,} rows; "
+        f"real={n_real:,}, syn={n_syn:,})"
+    )
 
 
 def save_geng_nilm_csv(df_watts: pd.DataFrame, appliance: str, path: Path) -> None:
@@ -327,14 +358,19 @@ def process_appliance_scenario(
     if len(real_watts) < n_real:
         raise ValueError(f"Only {len(real_watts)} real rows, need {n_real}")
 
-    mixed_watts = geng_mix(real_watts.iloc[:n_real], syn_watts, args.seed)
+    mixed_watts, labeled = geng_mix_labeled(
+        real_watts.iloc[:n_real], syn_watts, appliance
+    )
     out_name = scenario.combined_csv.format(app=appliance)
     out_path = args.mixed_dir / appliance / out_name
+    labeled_path = args.mixed_dir / appliance / out_name.replace(".csv", "_labeled.csv")
 
     if args.dry_run:
-        print(f"  [dry-run] would write {_rel(out_path)} ({len(mixed_watts):,} rows)")
+        print(f"  [dry-run] would write {_rel(out_path)} ({len(mixed_watts):,} rows, concat order)")
+        print(f"  [dry-run] would write {_rel(labeled_path)} (source 0=real block, 1=syn block)")
     else:
         save_geng_nilm_csv(mixed_watts, appliance, out_path)
+        save_labeled_mix_csv(labeled, appliance, labeled_path)
 
     origin_path = args.train_root / appliance / scenario.origin_csv.format(app=appliance)
     return {
@@ -346,6 +382,7 @@ def process_appliance_scenario(
         "file_label": scenario.file_label,
         "origin_csv": _rel(origin_path),
         "mixed_csv": _rel(out_path),
+        "labeled_csv": _rel(labeled_path),
         "syn_only_csv": _rel(syn_only_path),
     }
 
@@ -402,7 +439,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ukdale-raw", type=Path, default=DEFAULT_UKDALE_RAW)
     p.add_argument("--alg1-dir", type=Path, default=DEFAULT_ALG1_CSV)
     p.add_argument("--real-csv", type=Path, default=None)
-    p.add_argument("--seed", type=int, default=2024)
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=2024,
+        help="Unused (CLI compat). Geng shuffles window indices in DataProvider at train time.",
+    )
     p.add_argument("--no-post-filter", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--skip-verify", action="store_true", help="Skip prepare_all CSV checks")
@@ -461,6 +503,7 @@ def main() -> None:
         manifest_path.write_text(json.dumps(manifests, indent=2), encoding="utf-8")
     print(f"Manifest: {_rel(manifest_path)}")
     print_experiment_summary(args.train_root, appliances)
+    print("Visualize mix: python ../data/geng_mix_visualize.py <labeled_csv>")
     print("Next: EasyS2S_train.py / EasyS2S_Abtrain.py with originModel=False, TrainPercent=10 or 20")
 
 
