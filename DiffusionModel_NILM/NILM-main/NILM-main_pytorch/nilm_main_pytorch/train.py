@@ -52,6 +52,10 @@ def _setup_plot_style() -> None:
     import os
 
     os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+    os.environ.setdefault("MPLBACKEND", "Agg")
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
     import matplotlib.pyplot as plt
 
     plt.rcParams.update(
