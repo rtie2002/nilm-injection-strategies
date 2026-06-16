@@ -409,9 +409,9 @@ def parse_args() -> argparse.Namespace:
         help="Continue if a run fails or data/checkpoint is missing",
     )
     p.add_argument(
-        "--verbose",
+        "--quiet",
         action="store_true",
-        help="Print per-epoch / per-test detailed logs (default: quiet summaries)",
+        help="Hide per-epoch training/validation logs (default: show all information)",
     )
     add_device_cli_args(p)
     return p.parse_args()
@@ -451,7 +451,7 @@ def main() -> None:
         test_house=args.test_house,
         use_ewma=use_ewma,
         skip_errors=args.skip_errors,
-        verbose=args.verbose,
+        verbose=not args.quiet,
     )
 
     appliances_in_run = tuple(dict.fromkeys(r["appliance"] for r in results))
