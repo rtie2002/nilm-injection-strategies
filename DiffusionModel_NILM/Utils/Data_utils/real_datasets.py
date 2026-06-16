@@ -59,7 +59,7 @@ class CustomDataset(Dataset):
                 masks[:, -predict_length:, :] = 0
                 self.masking = masks.astype(bool)
             else:
-                raise NotImplementedError()
+                self.masking = np.ones(self.samples.shape, dtype=bool)
         self.sample_num = self.samples.shape[0]
 
     def __getsamples(self, data, proportion, seed):
