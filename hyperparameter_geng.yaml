@@ -1,0 +1,31 @@
+# Geng et al. NILM models — PyTorch (EasyS2S, S2P, FCN, AugLPN)
+# Train: python geng_train.py --model easy_s2s --appliance kettle
+
+data:
+  data_root: DiffusionModel_NILM/NILM-main/dataset_preprocess/created_data/UK_DALE
+  dataset_name: UK_DALE
+  train_percent: "20"
+  augmented: false
+
+model:
+  name: easy_s2s
+
+dataloader:
+  num_workers: 0
+  batch_size:
+    easy_s2s: 1024
+    s2p: 128
+    fcn: 128
+    auglpn: 128
+
+training:
+  device: cuda
+  gpu_id: 0
+  epochs: 100
+  patience: 20
+  lr: 0.001
+  loss: combined
+  huber_delta: 0.5
+  regression_alpha: 1.0
+  switch_beta: 0.1
+  save_dir: checkpoints_geng
