@@ -18,6 +18,7 @@ import argparse
 import json
 import time
 
+import numpy as np
 import torch
 
 from nilm_main_pytorch.data.datasets import build_train_val_loaders
@@ -40,9 +41,167 @@ from nilm_main_pytorch.utils import (
     norm_stats,
     portable_path_str,
     relativize_config,
+    results_dir_path,
     set_seed,
 )
 
+
+
+
+def _setup_plot_style() -> None:
+    import os
+
+    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+    import matplotlib.pyplot as plt
+
+    plt.rcParams.update(
+        {
+            "font.family": "serif",
+            "font.size": 10,
+            "axes.labelsize": 10,
+            "axes.titlesize": 10,
+            "legend.fontsize": 9,
+            "xtick.labelsize": 9,
+            "ytick.labelsize": 9,
+            "lines.linewidth": 1.8,
+            "axes.linewidth": 0.8,
+        }
+    )
+
+
+def _figure_dir(cfg: dict, model_name: str, appliance: str, augmented: bool) -> Path:
+    tag = "aug" if augmented else "origin"
+    pct = str(cfg["data"]["train_percent"])
+    return results_dir_path(cfg) / "figures" / f"{model_name.lower()}_{appliance}_{tag}_{pct}"
+
+
+def _graph_paths(cfg: dict, model_name: str, appliance: str, augmented: bool) -> dict[str, str]:
+    out_dir = _figure_dir(cfg, model_name, appliance, augmented)
+    return {
+        "figure_dir": portable_path_str(out_dir),
+        "loss_curve_png": portable_path_str(out_dir / "loss_curve.png"),
+        "loss_curve_pdf": portable_path_str(out_dir / "loss_curve.pdf"),
+        "metric_summary_png": portable_path_str(out_dir / "metric_summary.png"),
+        "metric_summary_pdf": portable_path_str(out_dir / "metric_summary.pdf"),
+        "on_samples_png": portable_path_str(out_dir / "on_period_samples.png"),
+        "on_samples_pdf": portable_path_str(out_dir / "on_period_samples.pdf"),
+    }
+
+
+def _save_loss_curve(train_losses: list[float], val_losses: list[float], out_dir: Path, title: str) -> None:
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import MaxNLocator
+
+    if not train_losses or not val_losses:
+        return
+    _setup_plot_style()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    epochs = np.arange(1, len(train_losses) + 1)
+    fig, ax = plt.subplots(figsize=(3.5, 3.5), constrained_layout=True)
+    markevery = max(1, len(epochs) // 8)
+    ax.plot(epochs, train_losses, marker="o", markersize=3.5, markevery=markevery, label="Train loss")
+    ax.plot(epochs, val_losses, marker="s", markersize=3.5, markevery=markevery, label="Validation loss")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Loss")
+    ax.set_title(title)
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=min(8, max(3, len(epochs) // 5)), integer=True, min_n_ticks=3))
+    ax.grid(True, linestyle="--", linewidth=0.6, alpha=0.5)
+    ax.legend(frameon=True, loc="best")
+    fig.savefig(out_dir / "loss_curve.pdf", format="pdf", bbox_inches="tight")
+    fig.savefig(out_dir / "loss_curve.png", format="png", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _save_metric_summary(metrics: dict[str, float], out_dir: Path, title: str) -> None:
+    import matplotlib.pyplot as plt
+
+    _setup_plot_style()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    labels = ["MAE (W)", "SAE", "F1"]
+    values = [float(metrics.get("mae", 0.0)), float(metrics.get("sae", 0.0)), float(metrics.get("f1", 0.0))]
+    fig, ax = plt.subplots(figsize=(3.5, 3.0), constrained_layout=True)
+    bars = ax.bar(labels, values, color=["#1f77b4", "#ff7f0e", "#2ca02c"])
+    ax.set_title(title)
+    ax.grid(True, axis="y", linestyle="--", linewidth=0.6, alpha=0.5)
+    for bar, value in zip(bars, values):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), f"{value:.3g}", ha="center", va="bottom", fontsize=8)
+    fig.savefig(out_dir / "metric_summary.pdf", format="pdf", bbox_inches="tight")
+    fig.savefig(out_dir / "metric_summary.png", format="png", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _denorm(values: np.ndarray, mean: float, std: float) -> np.ndarray:
+    return np.asarray(values, dtype=np.float64) * std + mean
+
+
+def _save_on_period_samples(
+    model,
+    val_loader,
+    device: torch.device,
+    stats: dict,
+    threshold_w: float,
+    out_dir: Path,
+    title: str,
+    n_samples: int = 3,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    ds = val_loader.dataset
+    if not hasattr(ds, "aggregate") or not hasattr(ds, "appliance"):
+        return
+
+    agg = np.asarray(ds.aggregate)
+    app = np.asarray(ds.appliance)
+    app_w = _denorm(app, stats["appliance_mean"], stats["appliance_std"])
+    on_energy = np.where(app_w >= threshold_w, app_w, 0.0).sum(axis=1) if app_w.ndim == 2 else np.zeros(len(ds))
+    candidates = np.flatnonzero(on_energy > 0)
+    if len(candidates) == 0:
+        print("no ON validation windows found; skip ON-period graph", flush=True)
+        return
+
+    _setup_plot_style()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    picks = candidates[np.argsort(on_energy[candidates])[-n_samples:][::-1]]
+    fig, axes = plt.subplots(len(picks), 1, figsize=(3.5, 3.2 * len(picks)), constrained_layout=True)
+    if len(picks) == 1:
+        axes = [axes]
+
+    model.eval()
+    for ax, idx in zip(axes, picks):
+        x_np = agg[idx]
+        y_np = app[idx]
+        x = torch.from_numpy(x_np[None, :].astype(np.float32)).to(device)
+        with torch.no_grad():
+            pred = model(x).detach().cpu().numpy()[0]
+
+        agg_w = _denorm(x_np, stats["aggregate_mean"], stats["aggregate_std"])
+        true_w = _denorm(y_np, stats["appliance_mean"], stats["appliance_std"])
+        pred_w = np.clip(_denorm(pred, stats["appliance_mean"], stats["appliance_std"]), 0.0, None)
+
+        t = np.arange(len(agg_w))
+        ax.plot(t, agg_w, color="#7f7f7f", linewidth=1.2, label="Aggregate")
+        ax.plot(t, true_w, color="#d62728", linewidth=1.8, label="Ground truth")
+        if np.ndim(pred_w) == 0 or len(np.atleast_1d(pred_w)) == 1:
+            mid = len(agg_w) // 2
+            ax.scatter([mid], [float(np.ravel(pred_w)[0])], color="#1f77b4", s=20, label="Prediction")
+        else:
+            pred_arr = np.ravel(pred_w)
+            if len(pred_arr) != len(t):
+                start = max(0, (len(t) - len(pred_arr)) // 2)
+                tt = np.arange(start, start + len(pred_arr))
+            else:
+                tt = t
+            ax.plot(tt, pred_arr, color="#1f77b4", linewidth=1.6, linestyle="--", label="Prediction")
+        ax.axhline(threshold_w, color="#2ca02c", linestyle=":", linewidth=1.0, label="ON threshold")
+        ax.set_ylabel("Power (W)")
+        ax.set_title(f"val window {idx}", pad=4)
+        ax.grid(True, linestyle="--", linewidth=0.6, alpha=0.5)
+        ax.legend(frameon=True, loc="upper right", fontsize=7)
+    axes[-1].set_xlabel("Timestep")
+    fig.suptitle(title, fontsize=10, y=1.01)
+    fig.savefig(out_dir / "on_period_samples.pdf", format="pdf", bbox_inches="tight")
+    fig.savefig(out_dir / "on_period_samples.png", format="png", dpi=300, bbox_inches="tight")
+    plt.close(fig)
 
 def _run_epoch_batches(
     model,
@@ -187,6 +346,8 @@ def train_one(
     stale = 0
     since = time.time()
     last_metrics: dict[str, float] | None = None
+    train_losses: list[float] = []
+    val_losses: list[float] = []
 
     for epoch in range(1, epochs + 1):
         if device.type == "cuda":
@@ -242,6 +403,8 @@ def train_one(
             label="val",
         )
         t_val = time.time() - t1
+        train_losses.append(float(train_loss))
+        val_losses.append(float(val_loss))
 
         # Metrics requires another full pass over the validation loader; avoid doing it every epoch unless requested.
         run_metrics = metrics_every > 0 and ((epoch % metrics_every == 0) or (epoch == epochs))
@@ -335,6 +498,16 @@ def train_one(
         on_thr_w,
         sample_second,
     )
+    figure_dir = _figure_dir(cfg, model_name, appliance, augmented)
+    graph_paths = _graph_paths(cfg, model_name, appliance, augmented)
+    if bool(cfg.get("evaluation", {}).get("save_plots", True)):
+        plot_title = f"{model_name.upper()} {appliance} {'aug' if augmented else 'origin'} {cfg['data']['train_percent']}"
+        _save_loss_curve(train_losses, val_losses, figure_dir, plot_title)
+        _save_metric_summary(val_metrics, figure_dir, f"Validation metrics ({appliance})")
+        _save_on_period_samples(model, val_loader, device, stats, on_thr_w, figure_dir, f"ON-period samples ({appliance})")
+        if verbose:
+            print(f"figures saved -> {graph_paths['figure_dir']}", flush=True)
+
     elapsed = time.time() - since
     if verbose:
         print(
@@ -356,6 +529,7 @@ def train_one(
         "checkpoint": portable_path_str(save_path),
         "elapsed_s": elapsed,
         "status": "trained",
+        **graph_paths,
     }
 
 

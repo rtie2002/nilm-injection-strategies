@@ -144,6 +144,13 @@ def run_all(
                             "val_f1": train_row.get("val_f1"),
                             "checkpoint": train_row.get("checkpoint"),
                             "train_csv": train_row.get("train_csv"),
+                            "figure_dir": train_row.get("figure_dir"),
+                            "loss_curve_png": train_row.get("loss_curve_png"),
+                            "loss_curve_pdf": train_row.get("loss_curve_pdf"),
+                            "metric_summary_png": train_row.get("metric_summary_png"),
+                            "metric_summary_pdf": train_row.get("metric_summary_pdf"),
+                            "on_samples_png": train_row.get("on_samples_png"),
+                            "on_samples_pdf": train_row.get("on_samples_pdf"),
                         }
                     )
 
@@ -368,6 +375,13 @@ def save_results_bundle(
         "val_sae",
         "val_f1",
         "checkpoint",
+        "figure_dir",
+        "loss_curve_png",
+        "loss_curve_pdf",
+        "metric_summary_png",
+        "metric_summary_pdf",
+        "on_samples_png",
+        "on_samples_pdf",
         "error",
     ]
     with csv_path.open("w", newline="", encoding="utf-8") as f:

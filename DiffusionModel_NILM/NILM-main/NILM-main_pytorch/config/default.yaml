@@ -57,6 +57,7 @@ evaluation:
   val_max_rows: null
   ewma_alpha: 0.9
   apply_ewma_when_augmented: true
+  save_plots: true
 
 paths:
   # Relative to NILM-main_pytorch/
