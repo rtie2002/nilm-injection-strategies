@@ -766,6 +766,18 @@ def run_training(cfg: dict, *, plot: bool = True, verbose: bool = True) -> dict:
             print(f"  val F1: {best_val_metrics['f1']:.4f}")
         print("=" * 10)
 
+    graph_paths = {
+        "figure_dir": str((CODE_DIR / cfg["training"]["loss_plot_path"]).parent),
+        "loss_curve_png": str((CODE_DIR / cfg["training"]["loss_plot_path"]).with_suffix(".png")),
+        "loss_curve_pdf": str((CODE_DIR / cfg["training"]["loss_plot_path"]).with_suffix(".pdf")),
+        "mae_curve_png": str((CODE_DIR / cfg["training"]["mae_plot_path"]).with_suffix(".png")),
+        "mae_curve_pdf": str((CODE_DIR / cfg["training"]["mae_plot_path"]).with_suffix(".pdf")),
+        "f1_curve_png": str((CODE_DIR / cfg["training"]["f1_plot_path"]).with_suffix(".png")),
+        "f1_curve_pdf": str((CODE_DIR / cfg["training"]["f1_plot_path"]).with_suffix(".pdf")),
+        "on_samples_png": str((CODE_DIR / cfg["training"]["on_sample_plot_path"]).with_suffix(".png")),
+        "on_samples_pdf": str((CODE_DIR / cfg["training"]["on_sample_plot_path"]).with_suffix(".pdf")),
+    }
+
     if plot:
         appliance = cfg["data"]["appliance"]
         model_name = cfg["model"]["name"].upper()
@@ -787,6 +799,8 @@ def run_training(cfg: dict, *, plot: bool = True, verbose: bool = True) -> dict:
         if verbose:
             print(f"loaded best checkpoint (epoch {ckpt.get('epoch')}) for ON-period plots")
         plot_on_period_samples(model, cfg, norm_stats, device, CODE_DIR / cfg["training"]["on_sample_plot_path"])
+        if verbose:
+            print(f"figures saved -> {graph_paths['figure_dir']}")
 
     return {
         "model": cfg["model"]["name"].lower(),
@@ -805,6 +819,7 @@ def run_training(cfg: dict, *, plot: bool = True, verbose: bool = True) -> dict:
         "checkpoint": str(save_path),
         "elapsed_s": elapsed,
         "status": "ok",
+        **graph_paths,
     }
 
 
