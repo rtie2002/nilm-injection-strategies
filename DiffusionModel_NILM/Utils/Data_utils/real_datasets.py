@@ -40,7 +40,10 @@ class CustomDataset(Dataset):
 
         self.window, self.period = window, period
         self.len, self.var_num = self.rawdata.shape[0], self.rawdata.shape[-1]
-        self.sample_num_total = max(self.len - self.window + 1, 0)
+        if self.style == 'non_overlapping':
+            self.sample_num_total = max(self.len // self.window, 0)
+        else:
+            self.sample_num_total = max(self.len - self.window + 1, 0)
         self.save2npy = save2npy
         self.auto_norm = neg_one_to_one
 
@@ -60,11 +63,17 @@ class CustomDataset(Dataset):
         self.sample_num = self.samples.shape[0]
 
     def __getsamples(self, data, proportion, seed):
-        x = np.zeros((self.sample_num_total, self.window, self.var_num))
-        for i in range(self.sample_num_total):
-            start = i
-            end = i + self.window
-            x[i, :, :] = data[start:end, :]
+        if self.style == 'non_overlapping':
+            indices = np.arange(self.sample_num_total) * self.window
+            x = np.zeros((len(indices), self.window, self.var_num))
+            for i, start in enumerate(indices):
+                x[i, :, :] = data[start : start + self.window, :]
+        else:
+            x = np.zeros((self.sample_num_total, self.window, self.var_num))
+            for i in range(self.sample_num_total):
+                start = i
+                end = i + self.window
+                x[i, :, :] = data[start:end, :]
 
         train_data, test_data = self.divide(x, proportion, seed)
 

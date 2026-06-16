@@ -1,14 +1,13 @@
 """
 One-click train + sample for all five UK-DALE diffusion models.
 
-Orchestrates the **original** Geng main.py (no changes to main.py / solver.py).
-Default: train then sample every appliance that has Data/datasets/{app}.csv.
+Matches Desktop DiffusionModel_NILM/run_diffusion_all.ps1:
+  - Non-overlapping windows (NOT len(sliding_dataset))
+  - sample_num = max(2*ceil(rows/512), ceil(200k/512))  (~391 windows for kettle)
+  - One GPU batch (400) is enough for ~391 windows
 
 Usage:
-  python run_diffusion_all.py
   python run_diffusion_all.py --no-train
-  python run_diffusion_all.py --train --sample
-  python run_diffusion_all.py --appliances kettle fridge --proportion 0.5
   python run_diffusion_all.py --plan-syn
 """
 
@@ -34,7 +33,8 @@ ALL_APPLIANCES = ("kettle", "microwave", "fridge", "dishwasher", "washingmachine
 DEFAULT_SEQ_LENGTH = 512
 DEFAULT_SAVE_CYCLE = 2000
 DEFAULT_MAX_EPOCHS = 20000
-DEFAULT_SAMPLE_SIZE_EVERY = 400
+DEFAULT_SAMPLE_BATCH_SIZE = 400
+MIN_SYN_TIMESTEPS = 200_000
 
 GENG_MAX_SYN_TIMESTEPS = 200_000
 INJECTION_200PCT_SYN_TIMESTEPS = 400_000
@@ -95,6 +95,15 @@ def count_csv_rows(path: Path) -> int:
         return max(sum(1 for _ in f) - 1, 0)
 
 
+def dynamic_sample_num(n_rows: int, window: int) -> int:
+    """Non-overlap windows for experiments up to 200% injection / 200k syn timesteps."""
+    if n_rows <= 0:
+        return max(windows_for_timesteps(MIN_SYN_TIMESTEPS, window), 1000)
+    desktop = 2 * math.ceil(n_rows / window)
+    min_windows = windows_for_timesteps(MIN_SYN_TIMESTEPS, window)
+    return max(desktop, min_windows)
+
+
 def diffusion_windows_from_rows(n_rows: int, window: int = DEFAULT_SEQ_LENGTH) -> int:
     return max(n_rows - window + 1, 0)
 
@@ -128,8 +137,8 @@ def print_synthetic_plan(appliances: tuple[str, ...], max_pct: float) -> None:
     print(f"  min windows:    {min_windows:,}  (non-overlap @ 512)")
     print()
     print(
-        f"{'appliance':<16} {'rows':>10} {'slide win':>10} {'non-ol win':>10} "
-        f"{'orig ts':>12}"
+        f"{'appliance':<16} {'rows':>10} {'non-ol':>10} {'sample#':>10} "
+        f"{'syn ts':>12}"
     )
     print("-" * 64)
 
@@ -140,17 +149,15 @@ def print_synthetic_plan(appliances: tuple[str, ...], max_pct: float) -> None:
             continue
         window = read_window(app)
         n_rows = count_csv_rows(path)
-        n_slide = diffusion_windows_from_rows(n_rows, window)
         n_non = non_overlap_windows(n_rows, window)
-        orig_ts = timesteps_from_windows(n_slide, window)
-        print(
-            f"{app:<16} {n_rows:>10,} {n_slide:>10,} {n_non:>10,} {orig_ts:>12,}"
-        )
+        n_sample = dynamic_sample_num(n_rows, window)
+        syn_ts = timesteps_from_windows(n_sample, window)
+        print(f"{app:<16} {n_rows:>10,} {n_non:>10,} {n_sample:>10,} {syn_ts:>12,}")
 
     print()
     print(
-        "Original main.py samples num=len(sliding_dataset) windows "
-        f"(size_every={DEFAULT_SAMPLE_SIZE_EVERY}) -> [0,1] MinMax in ddpm_fake_{{app}}.npy"
+        "Sampling uses ordered_non_overlapping + --sample_num "
+        f"(>= {windows_for_timesteps(MIN_SYN_TIMESTEPS, DEFAULT_SEQ_LENGTH)} windows for 200k timesteps)"
     )
 
 
@@ -182,12 +189,27 @@ def resolve_sample_milestone(appliance: str, milestone_arg: str) -> int:
     return int(milestone_arg)
 
 
+def resolve_sample_num(appliance: str, sample_num_arg: int) -> int:
+    window = read_window(appliance)
+    n_rows = count_csv_rows(dataset_path(appliance))
+    if sample_num_arg != 0:
+        return sample_num_arg
+    num = dynamic_sample_num(n_rows, window)
+    print(
+        f"  {appliance}: {n_rows:,} rows -> sample_num={num:,} "
+        f"(max(2*ceil(rows/w), ceil({MIN_SYN_TIMESTEPS}/w)))"
+    )
+    return num
+
+
 def run_main(
     appliance: str,
     gpu: int,
     *,
     train: bool,
     milestone: int | None,
+    sample_num: int,
+    sample_batch_size: int,
     proportion: float,
     tensorboard: bool,
     extra_opts: list[str],
@@ -212,6 +234,7 @@ def run_main(
         cmd.append("--train")
         cmd.extend(
             [
+                "--opts",
                 "dataloader.train_dataset.params.save2npy",
                 "False",
                 "dataloader.train_dataset.params.proportion",
@@ -221,7 +244,21 @@ def run_main(
     else:
         if milestone is None:
             milestone = latest_milestone(appliance)
-        cmd.extend(["--milestone", str(milestone)])
+        n_rows = count_csv_rows(dataset_path(appliance))
+        window = read_window(appliance)
+        n_samples = resolve_sample_num(appliance, sample_num)
+        cmd.extend(
+            [
+                "--milestone",
+                str(milestone),
+                "--sample_num",
+                str(n_samples),
+                "--sample_batch_size",
+                str(sample_batch_size),
+                "--sampling_mode",
+                "ordered_non_overlapping",
+            ]
+        )
 
     cmd.extend(extra_opts)
 
@@ -231,11 +268,12 @@ def run_main(
     if not train:
         n_rows = count_csv_rows(dataset_path(appliance))
         window = read_window(appliance)
-        n_windows = diffusion_windows_from_rows(n_rows, window)
-        est_batches = math.ceil(n_windows / DEFAULT_SAMPLE_SIZE_EVERY)
+        n_samples = resolve_sample_num(appliance, sample_num)
+        est_batches = math.ceil(n_samples / sample_batch_size)
         print(
-            f"  original sampling: {n_windows:,} windows "
-            f"(~{est_batches:,} batches @ {DEFAULT_SAMPLE_SIZE_EVERY})"
+            f"  non-overlap sampling: {n_samples:,} windows "
+            f"(~{est_batches} batch(es) @ {sample_batch_size}) = "
+            f"{timesteps_from_windows(n_samples, window):,} timesteps"
         )
     print(f"{'=' * 60}\n")
     subprocess.run(cmd, cwd=str(SCRIPT_DIR), check=True)
@@ -258,7 +296,7 @@ def run_main(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Train/sample diffusion models for all appliances (original main.py)"
+        description="Train/sample diffusion models (Desktop non-overlapping sampling)"
     )
     p.add_argument("--train", action="store_true", help="Train all selected appliances")
     p.add_argument("--sample", action="store_true", help="Sample from trained checkpoints")
@@ -269,6 +307,18 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=200.0,
         help="Max injection %% for --plan-syn",
+    )
+    p.add_argument(
+        "--sample-num",
+        type=int,
+        default=0,
+        help="Windows per appliance (0=auto: max(2*ceil(rows/w), ceil(200k/w)))",
+    )
+    p.add_argument(
+        "--sample-batch-size",
+        type=int,
+        default=DEFAULT_SAMPLE_BATCH_SIZE,
+        help="GPU batch size per diffusion reverse pass (400 fits ~391 windows in one batch)",
     )
     p.add_argument(
         "--proportion",
@@ -321,7 +371,7 @@ def main() -> None:
         do_train = False
         do_sample = True
 
-    print("Diffusion batch runner (original main.py — no solver changes)")
+    print("Diffusion batch runner (Desktop-aligned non-overlapping sampling)")
     print(f"  script dir:   {SCRIPT_DIR}")
     print(f"  appliances:   {args.appliances}")
     if do_train:
@@ -331,10 +381,9 @@ def main() -> None:
         )
     if do_sample:
         print(f"  sample:       milestone={args.milestone}")
-        print(
-            f"  note:         uses len(sliding_dataset) windows, "
-            f"size_every={DEFAULT_SAMPLE_SIZE_EVERY} (original Geng behavior)"
-        )
+        print(f"  sample_num:   {args.sample_num or 'auto'}")
+        print(f"  batch_size:   {args.sample_batch_size}")
+        print("  mode:         ordered_non_overlapping (NOT sliding overlap)")
     print()
     print_device_info(args.gpu)
 
@@ -357,6 +406,8 @@ def main() -> None:
                 args.gpu,
                 train=True,
                 milestone=None,
+                sample_num=args.sample_num,
+                sample_batch_size=args.sample_batch_size,
                 proportion=args.proportion,
                 tensorboard=args.tensorboard,
                 extra_opts=extra_opts,
@@ -371,6 +422,8 @@ def main() -> None:
                 args.gpu,
                 train=False,
                 milestone=milestone,
+                sample_num=args.sample_num,
+                sample_batch_size=args.sample_batch_size,
                 proportion=args.proportion,
                 tensorboard=False,
                 extra_opts=extra_opts,

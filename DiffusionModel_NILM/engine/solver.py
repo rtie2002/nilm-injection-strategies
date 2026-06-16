@@ -123,15 +123,44 @@ class Trainer(object):
         if self.logger is not None:
             self.logger.log_info('Training done, time: {:.2f}'.format(time.time() - tic))
 
-    def sample(self, num, size_every, shape=None):
+    def sample(self, num, size_every, shape=None, dataset=None, ordered=True, stride=1):
         if self.logger is not None:
             tic = time.time()
             self.logger.log_info('Begin to sample...')
         samples = np.empty([0, shape[0], shape[1]])
-        num_cycle = int(num // size_every) + 1
+        num_cycle = int(num // size_every) + (1 if num % size_every != 0 else 0)
 
-        for _ in range(num_cycle):
-            sample = self.ema.ema_model.generate_mts(batch_size=size_every)
+        use_conditional = (
+            hasattr(self.ema.ema_model, 'generate_with_conditions')
+            and dataset is not None
+            and shape[1] == 9
+        )
+
+        print(f"Generating {num} windows in {num_cycle} batch(es) (batch_size up to {size_every})")
+
+        for batch_idx in range(num_cycle):
+            windows_completed = batch_idx * size_every
+            windows_this_batch = min(size_every, num - windows_completed)
+            if windows_this_batch <= 0:
+                break
+
+            if use_conditional:
+                dataset_size = len(dataset.samples)
+                if ordered:
+                    indices = [(windows_completed + i * stride) % dataset_size for i in range(windows_this_batch)]
+                else:
+                    indices = np.random.choice(
+                        dataset_size, size=windows_this_batch, replace=(num > dataset_size)
+                    )
+                conditions = []
+                for idx in indices:
+                    window_data = dataset.samples[idx]
+                    conditions.append(window_data[:, 1:9])
+                conditions = torch.FloatTensor(np.stack(conditions)).to(self.device)
+                sample = self.ema.ema_model.generate_with_conditions(conditions)
+            else:
+                sample = self.ema.ema_model.generate_mts(batch_size=windows_this_batch)
+
             samples = np.row_stack([samples, sample.detach().cpu().numpy()])
             torch.cuda.empty_cache()
 
