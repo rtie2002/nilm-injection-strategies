@@ -168,6 +168,39 @@ def _aligned_prediction_slice(pred_w: np.ndarray, window_len: int, sl: slice) ->
     return t, pred_arr[(left - start):(right - start)], False
 
 
+def _dataset_window_energy(ds, app_w: np.ndarray, threshold_w: float) -> np.ndarray:
+    on_power = np.where(app_w >= threshold_w, app_w, 0.0)
+    if hasattr(ds, "indices") and hasattr(ds, "window_length"):
+        window_len = int(ds.window_length)
+        starts = np.asarray(ds.indices, dtype=np.int64)
+        sums = np.concatenate([[0.0], np.cumsum(on_power, dtype=np.float64)])
+        return sums[starts + window_len] - sums[starts]
+    if hasattr(ds, "target_length") and hasattr(ds, "num_windows"):
+        target_len = int(ds.target_length)
+        offset = target_len // 2
+        target_offset = int(getattr(ds, "target_offset", 0))
+        output_len = int(getattr(ds, "output_length", target_len))
+        energies = np.zeros(len(ds), dtype=np.float64)
+        for idx in range(len(ds)):
+            start = idx * target_len + offset + target_offset
+            end = start + output_len
+            energies[idx] = on_power[start:end].sum()
+        return energies
+    return np.zeros(len(ds), dtype=np.float64)
+
+
+def _dataset_plot_window(ds, idx: int) -> tuple[np.ndarray, np.ndarray]:
+    if hasattr(ds, "indices") and hasattr(ds, "window_length"):
+        start = int(ds.indices[idx])
+        end = start + int(ds.window_length)
+        return np.asarray(ds.aggregate[start:end]), np.asarray(ds.appliance[start:end])
+    if hasattr(ds, "target_length") and hasattr(ds, "input_length"):
+        start = idx * int(ds.target_length)
+        end = start + int(ds.input_length)
+        return np.asarray(ds.aggregate[start:end]), np.asarray(ds.appliance[start:end])
+    raise TypeError("Unsupported dataset type for ON-period plotting")
+
+
 def _save_on_period_samples(
     model,
     val_loader,
@@ -182,16 +215,17 @@ def _save_on_period_samples(
 
     ds = val_loader.dataset
     if not hasattr(ds, "aggregate") or not hasattr(ds, "appliance"):
+        print("validation dataset has no aggregate/appliance arrays; skip ON-period graph", flush=True)
         return
 
-    agg = np.asarray(ds.aggregate)
-    app = np.asarray(ds.appliance)
-    if agg.ndim != 2 or app.ndim != 2:
+    agg_series = np.asarray(ds.aggregate)
+    app_series = np.asarray(ds.appliance)
+    if agg_series.ndim != 1 or app_series.ndim != 1:
+        print("validation dataset arrays are not 1D series; skip ON-period graph", flush=True)
         return
 
-    app_w = _denorm(app, stats["appliance_mean"], stats["appliance_std"])
-    on_off = (app_w >= threshold_w).astype(np.int8)
-    on_energy = (app_w * on_off).sum(axis=1)
+    app_w_series = _denorm(app_series, stats["appliance_mean"], stats["appliance_std"])
+    on_energy = _dataset_window_energy(ds, app_w_series, threshold_w)
     candidates = np.flatnonzero(on_energy > 0)
     if len(candidates) == 0:
         print("no ON validation windows found; skip ON-period graph", flush=True)
@@ -206,8 +240,7 @@ def _save_on_period_samples(
 
     model.eval()
     for ax, idx in zip(axes, picks):
-        x_np = agg[idx]
-        y_np = app[idx]
+        x_np, y_np = _dataset_plot_window(ds, int(idx))
         x = torch.from_numpy(x_np[None, :].astype(np.float32)).to(device)
         with torch.no_grad():
             pred = model(x).detach().cpu().numpy()[0]
@@ -217,7 +250,8 @@ def _save_on_period_samples(
         pred_w = np.clip(_denorm(pred, stats["appliance_mean"], stats["appliance_std"]), 0.0, None)
 
         window_len = len(true_w)
-        sl = _on_slice_bounds(on_off[idx], window_len, pad=48)
+        on_mask = true_w >= threshold_w
+        sl = _on_slice_bounds(on_mask, window_len, pad=48)
         t = np.arange(sl.start, sl.stop)
         mark_step = max(1, len(t) // 12)
 
@@ -268,6 +302,7 @@ def _save_on_period_samples(
     fig.savefig(out_dir / "on_period_samples.pdf", format="pdf", bbox_inches="tight")
     fig.savefig(out_dir / "on_period_samples.png", format="png", dpi=300, bbox_inches="tight")
     plt.close(fig)
+    print(f"saved ON-period graph -> {out_dir / 'on_period_samples.png'}", flush=True)
 def _run_epoch_batches(
     model,
     loader,
@@ -635,4 +670,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
