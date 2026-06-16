@@ -170,7 +170,11 @@ def train_one(
     )
     stats = norm_stats(appliance)
     sample_second = float(cfg.get("evaluation", {}).get("sample_second", 6.0))
-    metrics_every = int(cfg.get("evaluation", {}).get("metrics_every_epochs", 5))
+    metrics_every = int(cfg.get("evaluation", {}).get("metrics_every_epochs", 0))
+    # TensorFlow customfit uses zero-based min_epoch. EasyS2S_train.py passes min_epoch=1,
+    # so best-checkpoint evaluation starts after epoch 2 in one-based logs.
+    min_epoch = int(train_cfg.get("min_epoch", 1))
+    eval_train_loss = bool(train_cfg.get("eval_train_loss_each_epoch", True))
     progress_batches = bool(train_cfg.get("progress_batches", True)) and verbose
 
     optimizer = torch.optim.Adam(model.parameters(), lr=float(train_params["lr"]))
@@ -189,7 +193,7 @@ def train_one(
             torch.cuda.reset_peak_memory_stats(device)
 
         t0 = time.time()
-        train_loss = _run_epoch_batches(
+        train_step_loss = _run_epoch_batches(
             model,
             train_loader,
             device,
@@ -204,6 +208,25 @@ def train_one(
         t_train = time.time() - t0
 
         model.eval()
+        train_loss = train_step_loss
+        t_train_eval = 0.0
+        if eval_train_loss:
+            # Match TensorFlow NetFlowExt.customfit: after each epoch it runs the
+            # network again on the training provider with dropout/noise disabled.
+            t_train_eval0 = time.time()
+            train_loss = _run_epoch_batches(
+                model,
+                train_loader,
+                device,
+                loss_fn,
+                train=False,
+                epoch=epoch,
+                total_epochs=epochs,
+                progress=False,
+                label="train_eval",
+            )
+            t_train_eval = time.time() - t_train_eval0
+
         t1 = time.time()
         if verbose:
             print(f"  [val] epoch {epoch}/{epochs} running...", flush=True)
@@ -221,7 +244,7 @@ def train_one(
         t_val = time.time() - t1
 
         # Metrics requires another full pass over the validation loader; avoid doing it every epoch unless requested.
-        run_metrics = (epoch % metrics_every == 0) or (epoch == epochs)
+        run_metrics = metrics_every > 0 and ((epoch % metrics_every == 0) or (epoch == epochs))
         t_metrics = 0.0
         if run_metrics:
             t2 = time.time()
@@ -242,6 +265,8 @@ def train_one(
                 f"train {train_loss:.4f} ({t_train:.1f}s)",
                 f"val {val_loss:.4f} ({t_val:.1f}s)",
             ]
+            if eval_train_loss and t_train_eval > 0:
+                parts.append(f"train_eval {t_train_eval:.1f}s")
             if last_metrics and run_metrics:
                 parts.append(f"MAE {last_metrics['mae']:.1f}W")
                 parts.append(f"F1 {last_metrics['f1']:.3f}")
@@ -251,31 +276,53 @@ def train_one(
             marker = " *best*" if val_loss < best_val else ""
             print(" | ".join(parts) + marker, flush=True)
 
-        if val_loss < best_val:
-            best_val = val_loss
-            best_epoch = epoch
-            stale = 0
-            save_path.parent.mkdir(parents=True, exist_ok=True)
-            torch.save(
-                {
-                    "model_state_dict": model.state_dict(),
-                    "cfg": relativize_config(cfg),
-                    "best_val_loss": best_val,
-                    "epoch": epoch,
-                    "appliance": appliance,
-                    "augmented": augmented,
-                    "model_name": model_name,
-                },
-                save_path,
-            )
-            if verbose:
-                print(f"  -> saved {portable_path_str(save_path)}", flush=True)
-        else:
-            stale += 1
-            if stale >= patience:
+        # Match TensorFlow NetFlowExt.customfit early stopping:
+        #   if epoch_zero_based >= min_epoch: compare val loss and save best.
+        #   stop only when best_valid_epoch + patience < current_epoch.
+        epoch_zero_based = epoch - 1
+        if epoch_zero_based >= min_epoch:
+            if val_loss < best_val:
+                best_val = val_loss
+                best_epoch = epoch
+                stale = 0
+                save_path.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(
+                    {
+                        "model_state_dict": model.state_dict(),
+                        "cfg": relativize_config(cfg),
+                        "best_val_loss": best_val,
+                        "epoch": epoch,
+                        "appliance": appliance,
+                        "augmented": augmented,
+                        "model_name": model_name,
+                    },
+                    save_path,
+                )
                 if verbose:
-                    print(f"early stop at epoch {epoch} (patience {patience})", flush=True)
-                break
+                    print(f"  -> saved {portable_path_str(save_path)}", flush=True)
+            else:
+                stale += 1
+                if stale > patience:
+                    if verbose:
+                        print(f"early stop at epoch {epoch} (patience {patience})", flush=True)
+                    break
+
+    if not save_path.exists():
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "model_state_dict": model.state_dict(),
+                "cfg": relativize_config(cfg),
+                "best_val_loss": val_loss,
+                "epoch": epoch,
+                "appliance": appliance,
+                "augmented": augmented,
+                "model_name": model_name,
+            },
+            save_path,
+        )
+        best_val = val_loss
+        best_epoch = epoch
 
     ckpt = torch.load(save_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])

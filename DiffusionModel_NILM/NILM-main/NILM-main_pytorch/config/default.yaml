@@ -26,6 +26,8 @@ training:
   seed: 2024
   epochs: 100
   patience: 20
+  min_epoch: 1          # TensorFlow customfit zero-based min_epoch; EasyS2S_train.py passes 1
+  eval_train_loss_each_epoch: true  # TensorFlow re-evaluates train loss after every epoch
   lr: 0.001
   huber_delta: 0.5
   regression_alpha: 1.0
@@ -48,7 +50,7 @@ training:
 
 evaluation:
   sample_second: 6.0
-  metrics_every_epochs: 5   # full MAE/SAE/F1 (val loss every epoch; faster training)
+  metrics_every_epochs: 0   # 0 = only compute full MAE/SAE/F1 after training; val loss still runs every epoch
   # Optional speed knob (NOT paper-faithful):
   # Limit validation CSV rows loaded for val_loss/early-stop. Example: 50000 or 200000.
   # Leave as null to use the full validation split (paper setting).

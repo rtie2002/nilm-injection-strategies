@@ -16,6 +16,7 @@ import torch
 
 # UK-DALE Geng pipeline: 6 s resolution (EasyS2S_test.py sample_second = 6.0)
 DEFAULT_SAMPLE_SECOND = 6.0
+EPS = 1e-9
 
 
 def get_TP(target: np.ndarray, prediction: np.ndarray, threshold: float) -> float:
@@ -50,7 +51,7 @@ def get_recall(target: np.ndarray, prediction: np.ndarray, threshold: float) -> 
     tp = get_TP(target, prediction, threshold)
     fn = get_FN(target, prediction, threshold)
     if tp + fn <= 0.0:
-        return tp / (tp + fn + 1e-9)
+        return tp / (tp + fn + EPS)
     return tp / (tp + fn)
 
 
@@ -58,7 +59,7 @@ def get_precision(target: np.ndarray, prediction: np.ndarray, threshold: float) 
     tp = get_TP(target, prediction, threshold)
     fp = get_FP(target, prediction, threshold)
     if tp + fp <= 0.0:
-        return tp / (tp + fp + 1e-9)
+        return tp / (tp + fp + EPS)
     return tp / (tp + fp)
 
 
@@ -88,7 +89,10 @@ def get_sae(target: np.ndarray, prediction: np.ndarray, sample_second: float) ->
     """Signal aggregate error: |E_pred - E_true| / |E_true| (kWh via sample_second)."""
     r = np.sum(target * sample_second * 1.0 / 3600.0)
     rhat = np.sum(prediction * sample_second * 1.0 / 3600.0)
-    return float(np.abs(r - rhat) / np.abs(r))
+    denom = np.abs(r)
+    if denom <= EPS:
+        return 0.0 if np.abs(rhat) <= EPS else float(np.abs(rhat))
+    return float(np.abs(r - rhat) / denom)
 
 
 def tp_tn_fp_fn(states_pred: np.ndarray, states_ground: np.ndarray) -> tuple[int, int, int, int]:
@@ -99,20 +103,26 @@ def tp_tn_fp_fn(states_pred: np.ndarray, states_ground: np.ndarray) -> tuple[int
     return tp, tn, fp, fn
 
 
+def _safe_divide(numerator: float, denominator: float, default: float = 0.0) -> float:
+    if denominator <= EPS:
+        return default
+    return float(numerator) / float(denominator)
+
+
 def _recall(tp: float, fn: float) -> float:
-    return tp / float(tp + fn)
+    return _safe_divide(tp, tp + fn)
 
 
 def _precision(tp: float, fp: float) -> float:
-    return tp / float(tp + fp)
+    return _safe_divide(tp, tp + fp)
 
 
 def _f1(prec: float, rec: float) -> float:
-    return 2 * (prec * rec) / float(prec + rec)
+    return _safe_divide(2 * prec * rec, prec + rec)
 
 
 def _accuracy(tp: float, tn: float, p: float, n: float) -> float:
-    return (tp + tn) / float(p + n)
+    return _safe_divide(tp + tn, p + n)
 
 
 def recall_precision_accuracy_f1(
