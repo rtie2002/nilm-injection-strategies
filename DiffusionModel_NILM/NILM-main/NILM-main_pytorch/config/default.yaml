@@ -30,7 +30,7 @@ training:
   huber_delta: 0.5
   regression_alpha: 1.0
   switch_beta: 0.1
-  progress_batches: true
+  progress_batches: false   # set true only for debugging
   # Per-model overrides (Geng *_train.py defaults)
   per_model:
     easy_s2s:

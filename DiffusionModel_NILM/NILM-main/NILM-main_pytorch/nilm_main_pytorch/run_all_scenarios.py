@@ -96,6 +96,7 @@ def run_all(
     test_house: int,
     use_ewma: bool | None,
     skip_errors: bool,
+    verbose: bool,
 ) -> list[dict]:
     scenarios = SUITES[suite]
     results: list[dict] = []
@@ -133,7 +134,7 @@ def run_all(
 
             try:
                 if phase in ("train", "train_test"):
-                    train_row = train_one(run_cfg, verbose=True, show_device=False)
+                    train_row = train_one(run_cfg, verbose=verbose, show_device=False)
                     row.update(
                         {
                             "train_status": train_row.get("status"),
@@ -151,7 +152,7 @@ def run_all(
                         run_cfg,
                         test_house=test_house,
                         use_ewma=use_ewma,
-                        verbose=True,
+                        verbose=verbose,
                     )
                     row.update(
                         {
@@ -168,6 +169,14 @@ def run_all(
                         }
                     )
                     row["status"] = "ok"
+                    if not verbose:
+                        # One-line summary per run (what you want to record): TEST metrics.
+                        print(
+                            f"RESULT {spec.model}/{appliance} "
+                            f"{'aug' if spec.augmented else 'origin'} pct={spec.train_percent} | "
+                            f"MAE {row['mae']:.2f}W | SAE {row['sae']:.4f} | F1 {row['f1']:.4f}",
+                            flush=True,
+                        )
                 else:
                     row["status"] = row.get("train_status", "trained")
 
@@ -399,6 +408,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Continue if a run fails or data/checkpoint is missing",
     )
+    p.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print per-epoch / per-test detailed logs (default: quiet summaries)",
+    )
     add_device_cli_args(p)
     return p.parse_args()
 
@@ -437,6 +451,7 @@ def main() -> None:
         test_house=args.test_house,
         use_ewma=use_ewma,
         skip_errors=args.skip_errors,
+        verbose=args.verbose,
     )
 
     appliances_in_run = tuple(dict.fromkeys(r["appliance"] for r in results))
