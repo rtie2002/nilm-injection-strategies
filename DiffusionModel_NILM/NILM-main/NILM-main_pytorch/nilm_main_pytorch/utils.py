@@ -225,6 +225,7 @@ def model_training_config(cfg: dict, model_name: str) -> dict[str, int | float]:
         "epochs": int(per_model.get("epochs", train_cfg.get("epochs", 100))),
         "patience": int(per_model.get("patience", train_cfg.get("patience", 20))),
         "lr": float(per_model.get("lr", train_cfg.get("lr", 0.001))),
+        "early_stopping": bool(per_model.get("early_stopping", train_cfg.get("early_stopping", True))),
     }
 
 

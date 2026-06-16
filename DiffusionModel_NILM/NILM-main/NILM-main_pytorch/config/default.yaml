@@ -38,15 +38,19 @@ training:
     easy_s2s:
       epochs: 100
       patience: 20
+      early_stopping: true
     s2p:
       epochs: 100
       patience: 10
+      early_stopping: false
     fcn:
       epochs: 300
       patience: 35
+      early_stopping: true
     auglpn:
       epochs: 100
       patience: 18
+      early_stopping: false
 
 evaluation:
   sample_second: 6.0

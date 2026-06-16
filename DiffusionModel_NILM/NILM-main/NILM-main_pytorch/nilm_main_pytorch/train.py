@@ -1,5 +1,5 @@
-"""
-Train Geng NILM models — PyTorch version.
+﻿"""
+Train Geng NILM models â€” PyTorch version.
 
   python -m nilm_main_pytorch.train --model easy_s2s --appliance kettle
   python -m nilm_main_pytorch.train --model s2p --appliance microwave --augmented
@@ -138,6 +138,36 @@ def _denorm(values: np.ndarray, mean: float, std: float) -> np.ndarray:
     return np.asarray(values, dtype=np.float64) * std + mean
 
 
+def _on_slice_bounds(on_mask: np.ndarray, window_len: int, pad: int = 48) -> slice:
+    on_idx = np.flatnonzero(on_mask)
+    if on_idx.size == 0:
+        return slice(0, window_len)
+    start = max(0, int(on_idx[0]) - pad)
+    end = min(window_len, int(on_idx[-1]) + pad + 1)
+    return slice(start, end)
+
+
+def _aligned_prediction_slice(pred_w: np.ndarray, window_len: int, sl: slice) -> tuple[np.ndarray, np.ndarray, bool]:
+    pred_arr = np.ravel(np.asarray(pred_w, dtype=np.float64))
+    if pred_arr.size == 0:
+        return np.asarray([], dtype=int), np.asarray([], dtype=np.float64), False
+    if pred_arr.size == 1:
+        mid = window_len // 2
+        return np.asarray([mid], dtype=int), pred_arr, True
+    if pred_arr.size == window_len:
+        t = np.arange(sl.start, sl.stop)
+        return t, pred_arr[sl], False
+
+    start = max(0, (window_len - pred_arr.size) // 2)
+    end = start + pred_arr.size
+    left = max(sl.start, start)
+    right = min(sl.stop, end)
+    if right <= left:
+        return np.asarray([], dtype=int), np.asarray([], dtype=np.float64), False
+    t = np.arange(left, right)
+    return t, pred_arr[(left - start):(right - start)], False
+
+
 def _save_on_period_samples(
     model,
     val_loader,
@@ -156,8 +186,12 @@ def _save_on_period_samples(
 
     agg = np.asarray(ds.aggregate)
     app = np.asarray(ds.appliance)
+    if agg.ndim != 2 or app.ndim != 2:
+        return
+
     app_w = _denorm(app, stats["appliance_mean"], stats["appliance_std"])
-    on_energy = np.where(app_w >= threshold_w, app_w, 0.0).sum(axis=1) if app_w.ndim == 2 else np.zeros(len(ds))
+    on_off = (app_w >= threshold_w).astype(np.int8)
+    on_energy = (app_w * on_off).sum(axis=1)
     candidates = np.flatnonzero(on_energy > 0)
     if len(candidates) == 0:
         print("no ON validation windows found; skip ON-period graph", flush=True)
@@ -166,7 +200,7 @@ def _save_on_period_samples(
     _setup_plot_style()
     out_dir.mkdir(parents=True, exist_ok=True)
     picks = candidates[np.argsort(on_energy[candidates])[-n_samples:][::-1]]
-    fig, axes = plt.subplots(len(picks), 1, figsize=(3.5, 3.2 * len(picks)), constrained_layout=True)
+    fig, axes = plt.subplots(len(picks), 1, figsize=(3.5, 3.5 * len(picks)), constrained_layout=True)
     if len(picks) == 1:
         axes = [axes]
 
@@ -182,31 +216,58 @@ def _save_on_period_samples(
         true_w = _denorm(y_np, stats["appliance_mean"], stats["appliance_std"])
         pred_w = np.clip(_denorm(pred, stats["appliance_mean"], stats["appliance_std"]), 0.0, None)
 
-        t = np.arange(len(agg_w))
-        ax.plot(t, agg_w, color="#7f7f7f", linewidth=1.2, label="Aggregate")
-        ax.plot(t, true_w, color="#d62728", linewidth=1.8, label="Ground truth")
-        if np.ndim(pred_w) == 0 or len(np.atleast_1d(pred_w)) == 1:
-            mid = len(agg_w) // 2
-            ax.scatter([mid], [float(np.ravel(pred_w)[0])], color="#1f77b4", s=20, label="Prediction")
-        else:
-            pred_arr = np.ravel(pred_w)
-            if len(pred_arr) != len(t):
-                start = max(0, (len(t) - len(pred_arr)) // 2)
-                tt = np.arange(start, start + len(pred_arr))
+        window_len = len(true_w)
+        sl = _on_slice_bounds(on_off[idx], window_len, pad=48)
+        t = np.arange(sl.start, sl.stop)
+        mark_step = max(1, len(t) // 12)
+
+        ax.plot(t, agg_w[sl], color="#7f7f7f", linewidth=1.4, linestyle="-", label="Aggregate", zorder=1)
+        ax.plot(
+            t,
+            true_w[sl],
+            color="#d62728",
+            linewidth=2.0,
+            linestyle="-",
+            label="Ground truth",
+            zorder=3,
+        )
+
+        pred_t, pred_y, is_point = _aligned_prediction_slice(pred_w, window_len, sl)
+        if pred_t.size:
+            if is_point:
+                ax.scatter(pred_t, pred_y, color="#1f77b4", s=20, label="Prediction", zorder=4)
             else:
-                tt = t
-            ax.plot(tt, pred_arr, color="#1f77b4", linewidth=1.6, linestyle="--", label="Prediction")
-        ax.axhline(threshold_w, color="#2ca02c", linestyle=":", linewidth=1.0, label="ON threshold")
+                ax.plot(
+                    pred_t,
+                    pred_y,
+                    color="#1f77b4",
+                    linewidth=1.8,
+                    linestyle="--",
+                    marker="o",
+                    markersize=3.5,
+                    markevery=mark_step,
+                    label="Prediction",
+                    zorder=4,
+                )
+
+        ax.axhline(
+            threshold_w,
+            color="#2ca02c",
+            linestyle=":",
+            linewidth=1.0,
+            label=f"ON threshold ({threshold_w:.0f} W)",
+            zorder=2,
+        )
         ax.set_ylabel("Power (W)")
-        ax.set_title(f"val window {idx}", pad=4)
+        ax.set_title(f"val window {idx} (ON energy {on_energy[idx]:.0f} W)", pad=4)
         ax.grid(True, linestyle="--", linewidth=0.6, alpha=0.5)
         ax.legend(frameon=True, loc="upper right", fontsize=7)
-    axes[-1].set_xlabel("Timestep")
+
+    axes[-1].set_xlabel("Timestep in window")
     fig.suptitle(title, fontsize=10, y=1.01)
     fig.savefig(out_dir / "on_period_samples.pdf", format="pdf", bbox_inches="tight")
     fig.savefig(out_dir / "on_period_samples.png", format="png", dpi=300, bbox_inches="tight")
     plt.close(fig)
-
 def _run_epoch_batches(
     model,
     loader,
@@ -343,6 +404,7 @@ def train_one(
     optimizer = torch.optim.Adam(model.parameters(), lr=float(train_params["lr"]))
     epochs = int(train_params["epochs"])
     patience = int(train_params["patience"])
+    early_stopping = bool(train_params.get("early_stopping", True))
     save_path = checkpoint_path(cfg, model_name, appliance, augmented)
 
     best_val = float("inf")
@@ -469,7 +531,7 @@ def train_one(
                     print(f"  -> saved {portable_path_str(save_path)}", flush=True)
             else:
                 stale += 1
-                if stale > patience:
+                if early_stopping and stale > patience:
                     if verbose:
                         print(f"early stop at epoch {epoch} (patience {patience})", flush=True)
                     break
@@ -573,3 +635,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

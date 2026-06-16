@@ -40,7 +40,7 @@ def build_loss_fn(
     norm_thr = norm_on_threshold(appliance)
     on_thr_w = PARAMS_APPLIANCE[appliance]["on_power_threshold"]
 
-    if augmented:
+    if name == "easy_s2s" and augmented:
         def loss_fn(pred: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
             reg = huber_batch(y, pred, huber_delta)
             sw = switch_state_penalty(y, pred, norm_thr).mean()
@@ -48,7 +48,6 @@ def build_loss_fn(
 
         return loss_fn, on_thr_w
 
-    if name == "easy_s2s":
-        return lambda pred, y: F.mse_loss(pred, y), on_thr_w
-
-    return lambda pred, y: huber_batch(y, pred, huber_delta), on_thr_w
+    # Original S2P, FCN, and AugLPN training scripts use mean squared error.
+    # EasyS2S origin also uses MSE.
+    return lambda pred, y: F.mse_loss(pred, y), on_thr_w
