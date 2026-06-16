@@ -200,7 +200,8 @@ def train_one(
 
         model.eval()
         t1 = time.time()
-        print(f"  [val] epoch {epoch}/{epochs} running...", flush=True)
+        if verbose:
+            print(f"  [val] epoch {epoch}/{epochs} running...", flush=True)
         val_loss = _run_epoch_batches(
             model,
             val_loader,
@@ -214,7 +215,7 @@ def train_one(
         )
         t_val = time.time() - t1
 
-        # Metrics requires another full pass over the validation loader; avoid doing it every epoch.
+        # Metrics requires another full pass over the validation loader; avoid doing it every epoch unless requested.
         run_metrics = (epoch % metrics_every == 0) or (epoch == epochs)
         t_metrics = 0.0
         if run_metrics:
