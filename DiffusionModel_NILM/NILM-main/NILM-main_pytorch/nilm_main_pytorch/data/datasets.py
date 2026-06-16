@@ -129,12 +129,20 @@ def build_loader(
     batch_size: int,
     shuffle: bool,
     num_workers: int = 0,
+    pin_memory: bool = False,
     stride: int = 1,
 ) -> DataLoader:
     window_length = PARAMS_APPLIANCE[appliance]["window_length"]
     agg, app = load_geng_csv(csv_path)
     ds = _make_dataset(model_name, agg, app, window_length, stride)
-    return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
+    return DataLoader(
+        ds,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=pin_memory and torch.cuda.is_available(),
+        persistent_workers=num_workers > 0,
+    )
 
 
 def build_train_val_loaders(
@@ -145,6 +153,7 @@ def build_train_val_loaders(
     val_csv: Path,
     batch_size: int,
     num_workers: int = 0,
+    pin_memory: bool = False,
     stride: int = 1,
 ) -> tuple[DataLoader, DataLoader]:
     train_loader = build_loader(
@@ -154,6 +163,7 @@ def build_train_val_loaders(
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
+        pin_memory=pin_memory,
         stride=stride,
     )
     val_loader = build_loader(
@@ -163,6 +173,7 @@ def build_train_val_loaders(
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
+        pin_memory=pin_memory,
         stride=stride,
     )
     return train_loader, val_loader

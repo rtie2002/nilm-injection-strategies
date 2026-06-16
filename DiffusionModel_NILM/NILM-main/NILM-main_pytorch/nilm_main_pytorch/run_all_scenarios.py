@@ -133,7 +133,7 @@ def run_all(
 
             try:
                 if phase in ("train", "train_test"):
-                    train_row = train_one(run_cfg, verbose=True)
+                    train_row = train_one(run_cfg, verbose=True, show_device=False)
                     row.update(
                         {
                             "train_status": train_row.get("status"),

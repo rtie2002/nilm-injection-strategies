@@ -11,7 +11,8 @@ model:
   name: easy_s2s
 
 dataloader:
-  num_workers: 0
+  num_workers: 2
+  pin_memory: true
   batch_size:
     easy_s2s: 1024
     s2p: 128
@@ -29,6 +30,7 @@ training:
   huber_delta: 0.5
   regression_alpha: 1.0
   switch_beta: 0.1
+  progress_batches: true
   # Per-model overrides (Geng *_train.py defaults)
   per_model:
     easy_s2s:
@@ -46,6 +48,7 @@ training:
 
 evaluation:
   sample_second: 6.0
+  metrics_every_epochs: 5   # full MAE/SAE/F1 (val loss every epoch; faster training)
   ewma_alpha: 0.9
   apply_ewma_when_augmented: true
 

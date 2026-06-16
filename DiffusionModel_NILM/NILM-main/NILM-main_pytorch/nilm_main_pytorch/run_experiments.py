@@ -79,7 +79,7 @@ def run_suite(
                 print(f"\n=== {phase.upper()} {label} ===")
                 try:
                     if phase == "train":
-                        row = train_one(run_cfg)
+                        row = train_one(run_cfg, show_device=False)
                     elif phase == "test":
                         row = test_one(
                             run_cfg,
@@ -87,7 +87,7 @@ def run_suite(
                             use_ewma=use_ewma,
                         )
                     else:
-                        row = train_one(run_cfg)
+                        row = train_one(run_cfg, show_device=False)
                         row["train_status"] = row.get("status")
                         test_row = test_one(
                             run_cfg,

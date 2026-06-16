@@ -170,7 +170,17 @@ def log_device(cfg: dict, *, prefix: str = "Device") -> torch.device:
     print(f"{prefix}: {describe_device(device)}")
     if device.type == "cuda":
         torch.cuda.set_device(device)
+        torch.cuda.reset_peak_memory_stats(device)
     return device
+
+
+def gpu_stats(device: torch.device) -> str:
+    if device.type != "cuda":
+        return "device=cpu"
+    idx = device.index if device.index is not None else 0
+    alloc = torch.cuda.memory_allocated(idx) / (1024**3)
+    peak = torch.cuda.max_memory_allocated(idx) / (1024**3)
+    return f"GPU {alloc:.2f} GiB used, {peak:.2f} GiB peak"
 
 
 def norm_stats(appliance: str) -> dict:
