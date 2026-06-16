@@ -22,7 +22,15 @@ from datetime import datetime
 from nilm_main_pytorch.models.params import ALL_APPLIANCES
 from nilm_main_pytorch.test import test_one
 from nilm_main_pytorch.train import train_one
-from nilm_main_pytorch.utils import load_config, merge_cli_config, results_path, save_json
+from nilm_main_pytorch.utils import (
+    add_device_cli_args,
+    device_options_from_args,
+    load_config,
+    log_device,
+    merge_cli_config,
+    results_path,
+    save_json,
+)
 
 SUITES = {
   # Tables 8–9: S2P, FCN, AugLPN × origin + augmented
@@ -125,12 +133,21 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--test-house", type=int, choices=[1, 2], default=2)
     p.add_argument("--ewma", action="store_true")
     p.add_argument("--no-ewma", action="store_true")
+    add_device_cli_args(p)
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    dev, gpu_id, require_cuda = device_options_from_args(args)
     cfg = load_config(args.config)
+    if dev is not None:
+        cfg["training"]["device"] = dev
+    if gpu_id is not None:
+        cfg["training"]["gpu_id"] = gpu_id
+    if require_cuda is not None:
+        cfg["training"]["require_cuda"] = require_cuda
+    log_device(cfg)
     appliances = (args.appliance,) if args.appliance else ALL_APPLIANCES
 
     use_ewma = None

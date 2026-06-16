@@ -71,9 +71,21 @@ def results_dir_path(cfg: dict) -> Path:
     return resolve_path(cfg["paths"]["results_dir"], anchor=PYTORCH_ROOT)
 
 
-def to_config_path(path: Path, anchor: Path) -> str:
-    """Express an absolute path relative to anchor (for portable yaml/checkpoints)."""
-    return str(path.resolve().relative_to(anchor.resolve())).replace("\\", "/")
+def to_config_path(path: Path, anchor: Path = PYTORCH_ROOT) -> str:
+    """Express path relative to NILM-main_pytorch/ (portable yaml/checkpoints)."""
+    p = path.resolve()
+    a = anchor.resolve()
+    try:
+        return str(p.relative_to(a)).replace("\\", "/")
+    except ValueError:
+        pass
+    # data_root lives under NILM-main/ (sibling of NILM-main_pytorch/)
+    try:
+        rel = p.relative_to(NILM_MAIN_DIR.resolve())
+        return str(Path("..") / rel).replace("\\", "/")
+    except ValueError:
+        pass
+    return portable_path_str(p)
 
 
 def relativize_config(cfg: dict) -> dict:
@@ -81,12 +93,12 @@ def relativize_config(cfg: dict) -> dict:
     out = copy.deepcopy(cfg)
     data = out.get("data", {})
     if "data_root" in data:
-        data["data_root"] = to_config_path(data_root_path(out), PYTORCH_ROOT)
+        data["data_root"] = to_config_path(data_root_path(out))
     paths = out.get("paths", {})
     if "checkpoint_dir" in paths:
-        paths["checkpoint_dir"] = to_config_path(checkpoint_dir_path(out), PYTORCH_ROOT)
+        paths["checkpoint_dir"] = to_config_path(checkpoint_dir_path(out))
     if "results_dir" in paths:
-        paths["results_dir"] = to_config_path(results_dir_path(out), PYTORCH_ROOT)
+        paths["results_dir"] = to_config_path(results_dir_path(out))
     return out
 
 
@@ -104,12 +116,61 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def get_device(cfg: dict) -> torch.device:
+def describe_device(device: torch.device) -> str:
+    """Human-readable device line for logs."""
+    if device.type == "cuda":
+        idx = device.index if device.index is not None else torch.cuda.current_device()
+        props = torch.cuda.get_device_properties(idx)
+        name = torch.cuda.get_device_name(idx)
+        mem_gb = props.total_memory / (1024**3)
+        return f"cuda:{idx} — {name} ({mem_gb:.1f} GiB)"
+    return "cpu"
+
+
+def get_device(cfg: dict, *, require_cuda: bool | None = None) -> torch.device:
+    """
+    Pick compute device from config.
+
+    training.device: auto | cuda | cpu  (default: auto)
+    training.gpu_id: GPU index when using CUDA (default: 0)
+    training.require_cuda: if true, error when CUDA unavailable (default: true)
+    """
     train_cfg = cfg.get("training", {})
-    if train_cfg.get("device", "cuda") == "cuda" and torch.cuda.is_available():
+    pref = str(train_cfg.get("device", "auto")).lower().strip()
+    want_cuda = pref in ("auto", "cuda", "gpu")
+    must_cuda = bool(train_cfg.get("require_cuda", True)) if require_cuda is None else require_cuda
+
+    if pref == "cpu":
+        return torch.device("cpu")
+
+    if want_cuda and torch.cuda.is_available():
+        n_gpu = torch.cuda.device_count()
         gpu_id = int(train_cfg.get("gpu_id", 0))
+        if gpu_id < 0 or gpu_id >= n_gpu:
+            print(f"WARNING: gpu_id {gpu_id} invalid ({n_gpu} GPU(s)); using cuda:0")
+            gpu_id = 0
         return torch.device(f"cuda:{gpu_id}")
+
+    if must_cuda or pref in ("cuda", "gpu"):
+        raise RuntimeError(
+            "GPU (CUDA) is required but not available.\n"
+            f"  torch.cuda.is_available() = {torch.cuda.is_available()}\n"
+            f"  torch.version.cuda          = {torch.version.cuda}\n"
+            "Fix: install a CUDA build of PyTorch in your conda env, or set\n"
+            "  training.device: cpu   in config/default.yaml\n"
+            "  --cpu                  on the command line"
+        )
+
     return torch.device("cpu")
+
+
+def log_device(cfg: dict, *, prefix: str = "Device") -> torch.device:
+    """Resolve device, print it, and return it."""
+    device = get_device(cfg)
+    print(f"{prefix}: {describe_device(device)}")
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
+    return device
 
 
 def norm_stats(appliance: str) -> dict:
@@ -166,6 +227,9 @@ def merge_cli_config(
     train_percent: str,
     data_root: str | None,
     epochs: int | None,
+    device: str | None = None,
+    gpu_id: int | None = None,
+    require_cuda: bool | None = None,
 ) -> dict:
     out = copy.deepcopy(cfg)
     out["model"]["name"] = model
@@ -174,7 +238,41 @@ def merge_cli_config(
     out["data"]["train_percent"] = train_percent
     if data_root:
         out["data"]["data_root"] = data_root
+    if device is not None:
+        out["training"]["device"] = device
+    if gpu_id is not None:
+        out["training"]["gpu_id"] = gpu_id
+    if require_cuda is not None:
+        out["training"]["require_cuda"] = require_cuda
     # Keep relative paths in cfg; resolve at use-time via data_root_path()
     if epochs is not None:
         out["training"]["epochs"] = epochs
     return out
+
+
+def add_device_cli_args(parser) -> None:
+    """--cpu / --cuda / --gpu-id / --allow-cpu on train & batch scripts."""
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--cpu", action="store_true", help="Force CPU (no GPU)")
+    group.add_argument("--cuda", action="store_true", help="Force CUDA; error if GPU missing")
+    parser.add_argument("--gpu-id", type=int, default=None, help="CUDA device index (default: 0)")
+    parser.add_argument(
+        "--allow-cpu",
+        action="store_true",
+        help="Do not error when GPU is missing (use CPU instead)",
+    )
+
+
+def device_options_from_args(args) -> tuple[str | None, int | None, bool | None]:
+    device: str | None = None
+    require_cuda: bool | None = None
+    if getattr(args, "cpu", False):
+        device = "cpu"
+        require_cuda = False
+    elif getattr(args, "cuda", False):
+        device = "cuda"
+        require_cuda = True
+    if getattr(args, "allow_cpu", False):
+        require_cuda = False
+    gpu_id = getattr(args, "gpu_id", None)
+    return device, gpu_id, require_cuda

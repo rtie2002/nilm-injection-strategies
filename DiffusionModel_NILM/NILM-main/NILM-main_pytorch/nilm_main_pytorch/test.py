@@ -33,10 +33,13 @@ from nilm_main_pytorch.metrics import (
 from nilm_main_pytorch.models import build_model
 from nilm_main_pytorch.models.params import ALL_APPLIANCES, PARAMS_APPLIANCE
 from nilm_main_pytorch.utils import (
+    add_device_cli_args,
     checkpoint_path,
     data_root_path,
+    device_options_from_args,
     get_device,
     load_config,
+    log_device,
     merge_cli_config,
     model_training_config,
     norm_stats,
@@ -71,6 +74,11 @@ def test_one(
     model_name = cfg["model"]["name"]
     augmented = bool(cfg["data"]["augmented"])
     device = get_device(cfg)
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
+    if verbose:
+        from nilm_main_pytorch.utils import describe_device
+        print(f"Device: {describe_device(device)}")
     stats = norm_stats(appliance)
     on_thr_w = PARAMS_APPLIANCE[appliance]["on_power_threshold"]
     sample_second = float(cfg.get("evaluation", {}).get("sample_second", DEFAULT_SAMPLE_SECOND))
@@ -178,11 +186,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ewma", action="store_true", help="Force EWMA post-process")
     p.add_argument("--no-ewma", action="store_true", help="Disable EWMA even if augmented")
     p.add_argument("--save", action="store_true", help="Write JSON to nilm_main_pytorch/results/")
+    add_device_cli_args(p)
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    dev, gpu_id, require_cuda = device_options_from_args(args)
     cfg = merge_cli_config(
         load_config(args.config),
         model=args.model,
@@ -191,6 +201,9 @@ def main() -> None:
         train_percent=args.train_percent,
         data_root=args.data_root,
         epochs=None,
+        device=dev,
+        gpu_id=gpu_id,
+        require_cuda=require_cuda,
     )
 
     use_ewma = None

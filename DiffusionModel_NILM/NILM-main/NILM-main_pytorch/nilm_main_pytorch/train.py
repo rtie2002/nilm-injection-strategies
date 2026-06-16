@@ -27,10 +27,12 @@ from nilm_main_pytorch.metrics import evaluate_loader
 from nilm_main_pytorch.models import build_model
 from nilm_main_pytorch.models.params import PARAMS_APPLIANCE
 from nilm_main_pytorch.utils import (
+    add_device_cli_args,
     checkpoint_path,
     data_root_path,
-    get_device,
+    device_options_from_args,
     load_config,
+    log_device,
     merge_cli_config,
     model_training_config,
     norm_stats,
@@ -47,9 +49,7 @@ def train_one(cfg: dict, *, verbose: bool = True) -> dict:
     train_cfg = cfg["training"]
 
     set_seed(int(train_cfg.get("seed", 2024)))
-    device = get_device(cfg)
-    if device.type == "cuda":
-        torch.cuda.set_device(device)
+    device = log_device(cfg)
 
     data_root = data_root_path(cfg)
     if verbose:
@@ -204,11 +204,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--train-percent", default="20")
     p.add_argument("--data-root", default=None)
     p.add_argument("--epochs", type=int, default=None)
+    add_device_cli_args(p)
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    dev, gpu_id, require_cuda = device_options_from_args(args)
     cfg = merge_cli_config(
         load_config(args.config),
         model=args.model,
@@ -217,6 +219,9 @@ def main() -> None:
         train_percent=args.train_percent,
         data_root=args.data_root,
         epochs=args.epochs,
+        device=dev,
+        gpu_id=gpu_id,
+        require_cuda=require_cuda,
     )
     result = train_one(cfg)
     print(json.dumps(result, indent=2))

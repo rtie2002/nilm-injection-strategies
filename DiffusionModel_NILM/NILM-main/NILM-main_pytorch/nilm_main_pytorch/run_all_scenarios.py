@@ -31,7 +31,17 @@ from datetime import datetime
 from nilm_main_pytorch.models.params import ALL_APPLIANCES
 from nilm_main_pytorch.test import test_one
 from nilm_main_pytorch.train import train_one
-from nilm_main_pytorch.utils import load_config, merge_cli_config, results_path, save_json, data_root_path, portable_path_str
+from nilm_main_pytorch.utils import (
+    add_device_cli_args,
+    data_root_path,
+    device_options_from_args,
+    load_config,
+    log_device,
+    merge_cli_config,
+    portable_path_str,
+    results_path,
+    save_json,
+)
 
 
 @dataclass(frozen=True)
@@ -389,12 +399,20 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Continue if a run fails or data/checkpoint is missing",
     )
+    add_device_cli_args(p)
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    dev, gpu_id, require_cuda = device_options_from_args(args)
     cfg = load_config(args.config)
+    if dev is not None:
+        cfg["training"]["device"] = dev
+    if gpu_id is not None:
+        cfg["training"]["gpu_id"] = gpu_id
+    if require_cuda is not None:
+        cfg["training"]["require_cuda"] = require_cuda
     appliances = (args.appliance,) if args.appliance else ALL_APPLIANCES
     scenarios = SUITES[args.suite]
 
@@ -406,6 +424,7 @@ def main() -> None:
 
     print(f"Suite: {args.suite} | Phase: {args.phase} | Appliances: {', '.join(appliances)}")
     print(f"Data root: {portable_path_str(data_root_path(cfg))}")
+    log_device(cfg)
     print(f"Scenarios ({len(scenarios)}):")
     for s in scenarios:
         print(f"  - {s.label} ({s.model}, pct={s.train_percent}, aug={s.augmented})")
