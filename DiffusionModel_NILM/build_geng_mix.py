@@ -70,24 +70,35 @@ class GengMixScenario:
     name: str
     n_real: int
     n_syn: int
+    mix_file_label: str | None = None
 
     @property
     def file_label(self) -> str:
+        """Combined CSV suffix (TrainPercent for augmented EasyS2S)."""
+        if self.mix_file_label is not None:
+            return self.mix_file_label
+        return crop_label(self.n_real)
+
+    @property
+    def real_origin_label(self) -> str:
+        """Origin crop label for loading {app}_{label}training_.csv."""
         return crop_label(self.n_real)
 
     @property
     def origin_csv(self) -> str:
-        return f"{{app}}_{self.file_label}training_.csv"
+        return f"{{app}}_{self.real_origin_label}training_.csv"
 
     @property
     def combined_csv(self) -> str:
         return f"UK_DALECombined{{app}}_file{self.file_label}.csv"
 
 
-# Paper Table 8 / EasyS2S TrainPercent scenarios (augmented only; origin from prepare_all).
+# Paper Tables 5–7 mix scenarios (augmented). Origin 100k/200k from prepare_all only.
 GENG_MIX_SCENARIOS: tuple[GengMixScenario, ...] = (
     GengMixScenario("100k+100k", 100_000, 100_000),
     GengMixScenario("200k+200k", 200_000, 200_000),
+    GengMixScenario("100k+200k", 100_000, 200_000, mix_file_label="10_20"),
+    GengMixScenario("200k+100k", 200_000, 100_000, mix_file_label="20_10"),
 )
 
 # Supporting files from prepare_all_ukdale (not rebuilt here).
@@ -118,6 +129,10 @@ def resolve_scenarios(args: argparse.Namespace) -> tuple[GengMixScenario, ...]:
         return (GENG_MIX_SCENARIOS[0],)
     if args.scenario == "20":
         return (GENG_MIX_SCENARIOS[1],)
+    if args.scenario == "10_20":
+        return (GENG_MIX_SCENARIOS[2],)
+    if args.scenario == "20_10":
+        return (GENG_MIX_SCENARIOS[3],)
     if args.n_real is not None and args.n_syn is not None:
         return (GengMixScenario(f"{args.n_real//1000}k+{args.n_syn//1000}k", args.n_real, args.n_syn),)
     return GENG_MIX_SCENARIOS
@@ -278,7 +293,7 @@ def load_real_watts(
             raise ValueError(f"--real-csv must have columns aggregate, {appliance}")
         return df[["aggregate", appliance]].iloc[:n_real].copy()
 
-    label = scenario.file_label
+    label = scenario.real_origin_label
     z_path = train_root / appliance / f"{appliance}_{label}training_.csv"
     if z_path.is_file():
         print(f"  real: {_rel(z_path)} (denormalize z-score -> watts)")
@@ -395,8 +410,10 @@ def print_experiment_summary(train_root: Path, appliances: tuple[str, ...]) -> N
     print("-" * 72)
     print(f"{'Origin 100k':<14} {'10':<20} {'{app}_10training_.csv'}")
     print(f"{'Origin 200k':<14} {'20':<20} {'{app}_20training_.csv'}")
-    print(f"{'100k+100k':<14} {'10 (combined)':<20} {'UK_DALECombined{app}_file10.csv'}")
-    print(f"{'200k+200k':<14} {'20 (combined)':<20} {'UK_DALECombined{app}_file20.csv'}")
+    print(f"{'100k+100k':<14} {'10':<20} {'UK_DALECombined{app}_file10.csv'}")
+    print(f"{'200k+200k':<14} {'20':<20} {'UK_DALECombined{app}_file20.csv'}")
+    print(f"{'100k+200k':<14} {'10_20':<20} {'UK_DALECombined{app}_file10_20.csv'}")
+    print(f"{'200k+100k':<14} {'20_10':<20} {'UK_DALECombined{app}_file20_10.csv'}")
     print()
     print("Val/test (all scenarios): {app}_validation_.csv, {app}_test_.csv, {app}_test_home1Small_.csv")
     print(f"Folder: {_rel(train_root)}/{{app}}/")
@@ -409,6 +426,8 @@ def print_experiment_summary(train_root: Path, appliances: tuple[str, ...]) -> N
             f"{app}_20training_.csv",
             f"UK_DALECombined{app}_file10.csv",
             f"UK_DALECombined{app}_file20.csv",
+            f"UK_DALECombined{app}_file10_20.csv",
+            f"UK_DALECombined{app}_file20_10.csv",
             f"{app}_validation_.csv",
             f"{app}_test_.csv",
         ):
@@ -428,7 +447,7 @@ def parse_args() -> argparse.Namespace:
         "--scenario",
         choices=["all", "10", "20"],
         default="all",
-        help="Mix scenario: all (100k+100k and 200k+200k), 10, or 20",
+        help="Mix scenario: all, 10, 20, 10_20 (100k+200k), 20_10 (200k+100k)",
     )
     p.add_argument("--n-real", type=int, default=None, help="Custom real timesteps (single custom scenario)")
     p.add_argument("--n-syn", type=int, default=None, help="Custom synthetic timesteps")
@@ -503,8 +522,8 @@ def main() -> None:
         manifest_path.write_text(json.dumps(manifests, indent=2), encoding="utf-8")
     print(f"Manifest: {_rel(manifest_path)}")
     print_experiment_summary(args.train_root, appliances)
-    print("Visualize mix: python ../data/geng_mix_visualize.py <labeled_csv>")
-    print("Next: EasyS2S_train.py / EasyS2S_Abtrain.py with originModel=False, TrainPercent=10 or 20")
+    print("Visualize mix: python ../../../data/geng_mix_visualize.py <labeled_csv>")
+    print("Train NILM (PyTorch): cd ../NILM-main_pytorch && python -m nilm_main_pytorch.train ...")
 
 
 if __name__ == "__main__":

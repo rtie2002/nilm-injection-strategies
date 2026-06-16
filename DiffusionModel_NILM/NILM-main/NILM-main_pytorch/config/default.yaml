@@ -1,0 +1,52 @@
+# NILM-main PyTorch — defaults (Geng Table 3)
+
+data:
+  data_root: ../dataset_preprocess/created_data/UK_DALE
+  dataset_name: UK_DALE
+  train_percent: "20"
+  augmented: false
+
+model:
+  name: easy_s2s
+
+dataloader:
+  num_workers: 0
+  batch_size:
+    easy_s2s: 1024
+    s2p: 128
+    fcn: 256
+    auglpn: 128
+
+training:
+  device: cuda
+  gpu_id: 0
+  seed: 2024
+  epochs: 100
+  patience: 20
+  lr: 0.001
+  huber_delta: 0.5
+  regression_alpha: 1.0
+  switch_beta: 0.1
+  # Per-model overrides (Geng *_train.py defaults)
+  per_model:
+    easy_s2s:
+      epochs: 100
+      patience: 20
+    s2p:
+      epochs: 100
+      patience: 10
+    fcn:
+      epochs: 300
+      patience: 35
+    auglpn:
+      epochs: 100
+      patience: 18
+
+evaluation:
+  sample_second: 6.0
+  ewma_alpha: 0.9
+  apply_ewma_when_augmented: true
+
+paths:
+  checkpoint_dir: checkpoints
+  results_dir: results
