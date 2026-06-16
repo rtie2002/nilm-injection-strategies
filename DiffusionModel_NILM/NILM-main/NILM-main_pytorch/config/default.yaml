@@ -1,6 +1,7 @@
 # NILM-main PyTorch — defaults (Geng Table 3)
 
 data:
+  # Relative to NILM-main_pytorch/ — works on any machine (Desktop, D:\Raymond, etc.)
   data_root: ../dataset_preprocess/created_data/UK_DALE
   dataset_name: UK_DALE
   train_percent: "20"
@@ -48,5 +49,6 @@ evaluation:
   apply_ewma_when_augmented: true
 
 paths:
+  # Relative to NILM-main_pytorch/
   checkpoint_dir: checkpoints
   results_dir: results

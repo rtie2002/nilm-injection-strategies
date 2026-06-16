@@ -8,10 +8,16 @@ Batch train / test for Geng paper tables — PyTorch version.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+_PYTORCH_ROOT = Path(__file__).resolve().parent.parent
+if str(_PYTORCH_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PYTORCH_ROOT))
+
 import argparse
 import json
 from datetime import datetime
-from pathlib import Path
 
 from nilm_main_pytorch.models.params import ALL_APPLIANCES
 from nilm_main_pytorch.test import test_one

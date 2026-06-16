@@ -14,17 +14,24 @@ Full grid (all models, all scenarios):
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# Allow running this file directly (IDE Run / full path) without `python -m ...`
+_PYTORCH_ROOT = Path(__file__).resolve().parent.parent
+if str(_PYTORCH_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PYTORCH_ROOT))
+
 import argparse
 import csv
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 
 from nilm_main_pytorch.models.params import ALL_APPLIANCES
 from nilm_main_pytorch.test import test_one
 from nilm_main_pytorch.train import train_one
-from nilm_main_pytorch.utils import load_config, merge_cli_config, results_path, save_json
+from nilm_main_pytorch.utils import load_config, merge_cli_config, results_path, save_json, data_root_path, portable_path_str
 
 
 @dataclass(frozen=True)
@@ -398,6 +405,7 @@ def main() -> None:
         use_ewma = False
 
     print(f"Suite: {args.suite} | Phase: {args.phase} | Appliances: {', '.join(appliances)}")
+    print(f"Data root: {portable_path_str(data_root_path(cfg))}")
     print(f"Scenarios ({len(scenarios)}):")
     for s in scenarios:
         print(f"  - {s.label} ({s.model}, pct={s.train_percent}, aug={s.augmented})")

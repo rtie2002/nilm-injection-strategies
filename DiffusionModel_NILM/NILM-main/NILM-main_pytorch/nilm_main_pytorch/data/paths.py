@@ -47,5 +47,7 @@ def test_csv_path(data_root: Path, appliance: str, test_house: int) -> Path:
 
 def require_csv(path: Path, label: str) -> Path:
     if not path.is_file():
-        raise FileNotFoundError(f"{label} CSV not found: {path}")
+        from nilm_main_pytorch.utils import portable_path_str
+
+        raise FileNotFoundError(f"{label} CSV not found: {portable_path_str(path)}")
     return path

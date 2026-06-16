@@ -7,10 +7,16 @@ Train Geng NILM models — PyTorch version.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+_PYTORCH_ROOT = Path(__file__).resolve().parent.parent
+if str(_PYTORCH_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PYTORCH_ROOT))
+
 import argparse
 import json
 import time
-from pathlib import Path
 
 import torch
 
@@ -22,11 +28,14 @@ from nilm_main_pytorch.models import build_model
 from nilm_main_pytorch.models.params import PARAMS_APPLIANCE
 from nilm_main_pytorch.utils import (
     checkpoint_path,
+    data_root_path,
     get_device,
     load_config,
     merge_cli_config,
     model_training_config,
     norm_stats,
+    portable_path_str,
+    relativize_config,
     set_seed,
 )
 
@@ -42,7 +51,9 @@ def train_one(cfg: dict, *, verbose: bool = True) -> dict:
     if device.type == "cuda":
         torch.cuda.set_device(device)
 
-    data_root = Path(cfg["data"]["data_root"])
+    data_root = data_root_path(cfg)
+    if verbose:
+        print(f"data_root: {portable_path_str(data_root)}")
     train_csv = require_csv(
         train_csv_path(
             data_root,
@@ -138,7 +149,7 @@ def train_one(cfg: dict, *, verbose: bool = True) -> dict:
             torch.save(
                 {
                     "model_state_dict": model.state_dict(),
-                    "cfg": cfg,
+                    "cfg": relativize_config(cfg),
                     "best_val_loss": best_val,
                     "epoch": epoch,
                     "appliance": appliance,
@@ -170,13 +181,13 @@ def train_one(cfg: dict, *, verbose: bool = True) -> dict:
         "model": model_name.lower(),
         "appliance": appliance,
         "augmented": augmented,
-        "train_csv": str(train_csv),
-        "val_csv": str(val_csv),
+        "train_csv": portable_path_str(train_csv),
+        "val_csv": portable_path_str(val_csv),
         "val_mae": val_metrics["mae"],
         "val_sae": val_metrics["sae"],
         "val_f1": val_metrics["f1"],
         "best_epoch": best_epoch,
-        "checkpoint": str(save_path),
+        "checkpoint": portable_path_str(save_path),
         "elapsed_s": time.time() - since,
         "status": "trained",
     }

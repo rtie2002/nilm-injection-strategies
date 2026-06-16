@@ -7,9 +7,15 @@ Test Geng NILM checkpoints — PyTorch version.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+_PYTORCH_ROOT = Path(__file__).resolve().parent.parent
+if str(_PYTORCH_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PYTORCH_ROOT))
+
 import argparse
 import json
-from pathlib import Path
 
 import numpy as np
 import torch
@@ -28,11 +34,13 @@ from nilm_main_pytorch.models import build_model
 from nilm_main_pytorch.models.params import ALL_APPLIANCES, PARAMS_APPLIANCE
 from nilm_main_pytorch.utils import (
     checkpoint_path,
+    data_root_path,
     get_device,
     load_config,
     merge_cli_config,
     model_training_config,
     norm_stats,
+    portable_path_str,
     results_path,
     save_json,
 )
@@ -67,7 +75,7 @@ def test_one(
     on_thr_w = PARAMS_APPLIANCE[appliance]["on_power_threshold"]
     sample_second = float(cfg.get("evaluation", {}).get("sample_second", DEFAULT_SAMPLE_SECOND))
 
-    data_root = Path(cfg["data"]["data_root"])
+    data_root = data_root_path(cfg)
     if split == "val":
         eval_csv = require_csv(validation_csv_path(data_root, appliance), "Validation")
     elif split == "test":
@@ -141,8 +149,8 @@ def test_one(
         "test_house": test_house,
         "split": split,
         "inference": "geng_full_sequence" if (geng_inference and split == "test") else "window_loader",
-        "eval_csv": str(eval_csv),
-        "checkpoint": str(ckpt_path),
+        "eval_csv": portable_path_str(eval_csv),
+        "checkpoint": portable_path_str(ckpt_path),
         "postprocess": postprocess,
         "mae": final_metrics["mae"],
         "sae": final_metrics["sae"],
