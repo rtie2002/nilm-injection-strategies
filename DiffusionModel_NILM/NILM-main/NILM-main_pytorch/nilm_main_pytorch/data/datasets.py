@@ -131,9 +131,10 @@ def build_loader(
     num_workers: int = 0,
     pin_memory: bool = False,
     stride: int = 1,
+    crop_rows: int | None = None,
 ) -> DataLoader:
     window_length = PARAMS_APPLIANCE[appliance]["window_length"]
-    agg, app = load_geng_csv(csv_path)
+    agg, app = load_geng_csv(csv_path, crop=crop_rows)
     ds = _make_dataset(model_name, agg, app, window_length, stride)
     return DataLoader(
         ds,
@@ -155,6 +156,7 @@ def build_train_val_loaders(
     num_workers: int = 0,
     pin_memory: bool = False,
     stride: int = 1,
+    val_crop_rows: int | None = None,
 ) -> tuple[DataLoader, DataLoader]:
     train_loader = build_loader(
         model_name=model_name,
@@ -175,5 +177,6 @@ def build_train_val_loaders(
         num_workers=num_workers,
         pin_memory=pin_memory,
         stride=stride,
+        crop_rows=val_crop_rows,
     )
     return train_loader, val_loader

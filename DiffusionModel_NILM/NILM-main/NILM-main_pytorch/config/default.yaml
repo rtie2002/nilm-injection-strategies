@@ -49,6 +49,10 @@ training:
 evaluation:
   sample_second: 6.0
   metrics_every_epochs: 5   # full MAE/SAE/F1 (val loss every epoch; faster training)
+  # Optional speed knob (NOT paper-faithful):
+  # Limit validation CSV rows loaded for val_loss/early-stop. Example: 50000 or 200000.
+  # Leave as null to use the full validation split (paper setting).
+  val_max_rows: null
   ewma_alpha: 0.9
   apply_ewma_when_augmented: true
 

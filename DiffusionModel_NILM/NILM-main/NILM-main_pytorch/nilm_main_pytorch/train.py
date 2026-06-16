@@ -135,6 +135,10 @@ def train_one(
     num_workers = int(dl_cfg.get("num_workers", 0))
     pin_memory = bool(dl_cfg.get("pin_memory", True))
 
+    val_crop = cfg.get("evaluation", {}).get("val_max_rows", None)
+    if val_crop is not None:
+        val_crop = int(val_crop)
+
     train_loader, val_loader = build_train_val_loaders(
         model_name=model_name,
         appliance=appliance,
@@ -143,6 +147,7 @@ def train_one(
         batch_size=batch_size,
         num_workers=num_workers,
         pin_memory=pin_memory,
+        val_crop_rows=val_crop,
     )
 
     n_train = len(train_loader.dataset)
