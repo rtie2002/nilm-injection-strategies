@@ -190,17 +190,24 @@ def run_all(
             except FileNotFoundError as exc:
                 row["status"] = "skipped"
                 row["error"] = str(exc)
-                print(f"SKIP: {exc}")
+                print(f"SKIP: {exc}", flush=True)
+                results.append(row)
                 if not skip_errors:
-                    results.append(row)
+                    print(
+                        "Hint: build missing mixes with "
+                        "cd DiffusionModel_NILM && python build_geng_mix.py --scenario missing",
+                        flush=True,
+                    )
                     raise
+                continue
             except Exception as exc:
                 row["status"] = "failed"
                 row["error"] = str(exc)
-                print(f"FAIL: {exc}")
+                print(f"FAIL: {exc}", flush=True)
+                results.append(row)
                 if not skip_errors:
-                    results.append(row)
                     raise
+                continue
 
             results.append(row)
 

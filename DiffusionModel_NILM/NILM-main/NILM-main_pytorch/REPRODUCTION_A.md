@@ -26,7 +26,20 @@
 | 100k + 200k | `10_20` `--augmented` | `UK_DALECombined{app}_file10_20.csv` |
 | 200k + 100k | `20_10` `--augmented` | `UK_DALECombined{app}_file20_10.csv` |
 
-Build mixes: `cd DiffusionModel_NILM && python build_geng_mix.py`
+Build mixes (all 4 augmented scenarios, including asymmetric 100k+200k / 200k+100k):
+
+```bash
+cd DiffusionModel_NILM && python build_geng_mix.py
+```
+
+If you already have `file10` / `file20` and only need the asymmetric mixes:
+
+```bash
+python build_geng_mix.py --scenario missing
+# or explicitly:
+python build_geng_mix.py --scenario 10_20
+python build_geng_mix.py --scenario 20_10
+```
 
 ## Reproduction commands
 

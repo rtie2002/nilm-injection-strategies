@@ -393,7 +393,10 @@ def main() -> None:
     print("\nNext steps (not done by this script):")
     print("  1. Algorithm 1 → Data/datasets/{appliance}.csv (diffusion train)")
     print("  2. Sample synthetic watts + sum-of-5 aggregate")
-    print("  3. build_geng_mix.py → UK_DALECombined{appliance}_file10/20.csv")
+    print(
+        "  3. build_geng_mix.py → file10, file20, file10_20, file20_10 "
+        "(or: python build_geng_mix.py --scenario missing)"
+    )
 
 
 if __name__ == "__main__":

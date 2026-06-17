@@ -2,10 +2,12 @@
 Geng et al. (Energy 2025) — one-click npy -> X/Y synthetic -> all paper mix scenarios.
 
 Paper mix scenarios (origin CSVs come from prepare_all_ukdale.py only):
-  Origin 100k  -> {app}_10training_.csv           (real only, already exists)
-  Origin 200k  -> {app}_20training_.csv           (real only, already exists)
-  100k + 100k  -> UK_DALECombined{app}_file10.csv (built here)
-  200k + 200k  -> UK_DALECombined{app}_file20.csv (built here)
+  Origin 100k  -> {app}_10training_.csv             (real only, already exists)
+  Origin 200k  -> {app}_20training_.csv             (real only, already exists)
+  100k + 100k  -> UK_DALECombined{app}_file10.csv    (built here)
+  200k + 200k  -> UK_DALECombined{app}_file20.csv   (built here)
+  100k + 200k  -> UK_DALECombined{app}_file10_20.csv (built here)
+  200k + 100k  -> UK_DALECombined{app}_file20_10.csv (built here)
 
 Also writes labeled inspection CSV (watts, row order = concat only; NILM shuffles at train time):
   UK_DALECombined{app}_file{label}_labeled.csv
@@ -19,8 +21,11 @@ One-click (all appliances, all mix scenarios):
   cd DiffusionModel_NILM
   python build_geng_mix.py
 
-Single scenario:
+Single / missing scenarios:
   python build_geng_mix.py --scenario 20
+  python build_geng_mix.py --scenario 10_20
+  python build_geng_mix.py --scenario 20_10
+  python build_geng_mix.py --scenario missing   # only file10/20/10_20/20_10 not on disk
   python build_geng_mix.py --appliance kettle --n-real 200000 --n-syn 200000
 """
 
@@ -122,9 +127,43 @@ def _resolve(path: str | Path) -> Path:
     return (SCRIPT_DIR / p).resolve() if not p.is_absolute() else p.resolve()
 
 
-def resolve_scenarios(args: argparse.Namespace) -> tuple[GengMixScenario, ...]:
+def combined_csv_path(train_root: Path, appliance: str, scenario: GengMixScenario) -> Path:
+    name = scenario.combined_csv.format(app=appliance)
+    return train_root / appliance / name
+
+
+def scenarios_with_missing_outputs(
+    train_root: Path,
+    appliances: tuple[str, ...],
+) -> tuple[GengMixScenario, ...]:
+    """Return mix scenarios where at least one appliance is missing its combined CSV."""
+    out: list[GengMixScenario] = []
+    for scenario in GENG_MIX_SCENARIOS:
+        for app in appliances:
+            if not combined_csv_path(train_root, app, scenario).is_file():
+                out.append(scenario)
+                break
+    return tuple(out)
+
+
+def resolve_scenarios(
+    args: argparse.Namespace,
+    *,
+    appliances: tuple[str, ...],
+    train_root: Path,
+) -> tuple[GengMixScenario, ...]:
     if args.scenario == "all":
         return GENG_MIX_SCENARIOS
+    if args.scenario == "missing":
+        missing = scenarios_with_missing_outputs(train_root, appliances)
+        if not missing:
+            print("All mix CSVs already exist for selected appliances.")
+        else:
+            print(
+                "Missing mix scenarios to build: "
+                + ", ".join(s.name for s in missing)
+            )
+        return missing
     if args.scenario == "10":
         return (GENG_MIX_SCENARIOS[0],)
     if args.scenario == "20":
@@ -380,6 +419,23 @@ def process_appliance_scenario(
     out_path = args.mixed_dir / appliance / out_name
     labeled_path = args.mixed_dir / appliance / out_name.replace(".csv", "_labeled.csv")
 
+    if getattr(args, "skip_existing", False) and out_path.is_file():
+        print(f"  skip existing: {_rel(out_path)}")
+        origin_path = args.train_root / appliance / scenario.origin_csv.format(app=appliance)
+        return {
+            "scenario": scenario.name,
+            "appliance": appliance,
+            "n_real": n_real,
+            "n_syn": n_syn,
+            "n_mix": None,
+            "file_label": scenario.file_label,
+            "origin_csv": _rel(origin_path),
+            "mixed_csv": _rel(out_path),
+            "labeled_csv": _rel(labeled_path),
+            "syn_only_csv": _rel(syn_only_path),
+            "skipped": True,
+        }
+
     if args.dry_run:
         print(f"  [dry-run] would write {_rel(out_path)} ({len(mixed_watts):,} rows, concat order)")
         print(f"  [dry-run] would write {_rel(labeled_path)} (source 0=real block, 1=syn block)")
@@ -445,9 +501,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--all", action="store_true", help="All five appliances (default if no --appliance)")
     p.add_argument(
         "--scenario",
-        choices=["all", "10", "20"],
+        choices=["all", "missing", "10", "20", "10_20", "20_10"],
         default="all",
-        help="Mix scenario: all, 10, 20, 10_20 (100k+200k), 20_10 (200k+100k)",
+        help=(
+            "Mix scenario: all (default, all 4 mixes), missing (only absent CSVs), "
+            "10, 20, 10_20 (100k+200k), 20_10 (200k+100k)"
+        ),
+    )
+    p.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="With --scenario all/missing: do not overwrite mix CSVs that already exist",
     )
     p.add_argument("--n-real", type=int, default=None, help="Custom real timesteps (single custom scenario)")
     p.add_argument("--n-syn", type=int, default=None, help="Custom synthetic timesteps")
@@ -484,9 +548,14 @@ def main() -> None:
     # One-click default: all appliances, all scenarios.
     if not args.all and args.appliance is None:
         args.all = True
+    if args.scenario == "missing":
+        args.skip_existing = True
 
     appliances: tuple[str, ...] = ALL_APPLIANCES if args.all else (args.appliance,)  # type: ignore[arg-type]
-    scenarios = resolve_scenarios(args)
+    scenarios = resolve_scenarios(args, appliances=appliances, train_root=args.train_root)
+    if not scenarios:
+        print_experiment_summary(args.train_root, appliances)
+        return
 
     print("Geng mix builder (one-click)")
     print(f"  npy dir:     {_rel(args.npy_dir)}")
