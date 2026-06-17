@@ -1,4 +1,4 @@
-﻿"""
+"""
 Train Geng NILM models â€” PyTorch version.
 
   python -m nilm_main_pytorch.train --model easy_s2s --appliance kettle
@@ -74,9 +74,10 @@ def _setup_plot_style() -> None:
 
 
 def _figure_dir(cfg: dict, model_name: str, appliance: str, augmented: bool) -> Path:
-    tag = "aug" if augmented else "origin"
-    pct = str(cfg["data"]["train_percent"])
-    return results_dir_path(cfg) / "figures" / f"{model_name.lower()}_{appliance}_{tag}_{pct}"
+    from nilm_main_pytorch.utils import experiment_run_suffix
+
+    suffix = experiment_run_suffix(cfg, augmented=augmented)
+    return results_dir_path(cfg) / "figures" / f"{model_name.lower()}_{appliance}_{suffix}"
 
 
 def _graph_paths(cfg: dict, model_name: str, appliance: str, augmented: bool) -> dict[str, str]:
@@ -201,6 +202,15 @@ def _dataset_plot_window(ds, idx: int) -> tuple[np.ndarray, np.ndarray]:
     raise TypeError("Unsupported dataset type for ON-period plotting")
 
 
+def _appliance_plot_ylim(true_w: np.ndarray, pred_y: np.ndarray, threshold_w: float) -> float:
+    peak = float(threshold_w)
+    if true_w.size:
+        peak = max(peak, float(np.max(true_w)))
+    if pred_y.size:
+        peak = max(peak, float(np.max(pred_y)))
+    return max(peak * 1.15, threshold_w * 2.0, 10.0)
+
+
 def _save_on_period_samples(
     model,
     val_loader,
@@ -234,12 +244,16 @@ def _save_on_period_samples(
     _setup_plot_style()
     out_dir.mkdir(parents=True, exist_ok=True)
     picks = candidates[np.argsort(on_energy[candidates])[-n_samples:][::-1]]
-    fig, axes = plt.subplots(len(picks), 1, figsize=(3.5, 3.5 * len(picks)), constrained_layout=True)
-    if len(picks) == 1:
+    n_rows = 2 * len(picks)
+    fig, axes = plt.subplots(n_rows, 1, figsize=(3.5, 2.4 * n_rows), constrained_layout=True)
+    if n_rows == 1:
         axes = [axes]
 
     model.eval()
-    for ax, idx in zip(axes, picks):
+    for row, idx in enumerate(picks):
+        ax_agg = axes[2 * row]
+        ax_app = axes[2 * row + 1]
+
         x_np, y_np = _dataset_plot_window(ds, int(idx))
         x = torch.from_numpy(x_np[None, :].astype(np.float32)).to(device)
         with torch.no_grad():
@@ -255,10 +269,16 @@ def _save_on_period_samples(
         t = np.arange(sl.start, sl.stop)
         mark_step = max(1, len(t) // 12)
 
-        ax.plot(t, agg_w[sl], color="#7f7f7f", linewidth=1.4, linestyle="-", label="Aggregate", zorder=1)
-        ax.plot(
+        ax_agg.plot(t, agg_w[sl], color="#7f7f7f", linewidth=1.4, linestyle="-", label="Aggregate", zorder=1)
+        ax_agg.set_ylabel("Agg (W)")
+        ax_agg.set_title(f"val window {idx} (ON energy {on_energy[idx]:.0f} W)", pad=4)
+        ax_agg.grid(True, linestyle="--", linewidth=0.6, alpha=0.5)
+        ax_agg.legend(frameon=True, loc="upper right", fontsize=7)
+
+        true_slice = true_w[sl]
+        ax_app.plot(
             t,
-            true_w[sl],
+            true_slice,
             color="#d62728",
             linewidth=2.0,
             linestyle="-",
@@ -269,9 +289,9 @@ def _save_on_period_samples(
         pred_t, pred_y, is_point = _aligned_prediction_slice(pred_w, window_len, sl)
         if pred_t.size:
             if is_point:
-                ax.scatter(pred_t, pred_y, color="#1f77b4", s=20, label="Prediction", zorder=4)
+                ax_app.scatter(pred_t, pred_y, color="#1f77b4", s=20, label="Prediction", zorder=4)
             else:
-                ax.plot(
+                ax_app.plot(
                     pred_t,
                     pred_y,
                     color="#1f77b4",
@@ -284,7 +304,7 @@ def _save_on_period_samples(
                     zorder=4,
                 )
 
-        ax.axhline(
+        ax_app.axhline(
             threshold_w,
             color="#2ca02c",
             linestyle=":",
@@ -292,12 +312,12 @@ def _save_on_period_samples(
             label=f"ON threshold ({threshold_w:.0f} W)",
             zorder=2,
         )
-        ax.set_ylabel("Power (W)")
-        ax.set_title(f"val window {idx} (ON energy {on_energy[idx]:.0f} W)", pad=4)
-        ax.grid(True, linestyle="--", linewidth=0.6, alpha=0.5)
-        ax.legend(frameon=True, loc="upper right", fontsize=7)
+        ax_app.set_ylim(0.0, _appliance_plot_ylim(true_slice, pred_y, threshold_w))
+        ax_app.set_ylabel("App (W)")
+        ax_app.grid(True, linestyle="--", linewidth=0.6, alpha=0.5)
+        ax_app.legend(frameon=True, loc="upper right", fontsize=7)
+        ax_app.set_xlabel("Timestep in window")
 
-    axes[-1].set_xlabel("Timestep in window")
     fig.suptitle(title, fontsize=10, y=1.01)
     fig.savefig(out_dir / "on_period_samples.pdf", format="pdf", bbox_inches="tight")
     fig.savefig(out_dir / "on_period_samples.png", format="png", dpi=300, bbox_inches="tight")
@@ -377,13 +397,15 @@ def train_one(
     if verbose:
         print(f"data_root: {portable_path_str(data_root)}", flush=True)
 
+    injection_rho = cfg["data"].get("injection_rho")
     train_csv = require_csv(
         train_csv_path(
             data_root,
             appliance,
-            origin=not augmented,
+            origin=not augmented if injection_rho is None else int(injection_rho) == 0,
             train_percent=str(cfg["data"]["train_percent"]),
             dataset_name=cfg["data"].get("dataset_name", "UK_DALE"),
+            injection_rho=int(injection_rho) if injection_rho is not None else None,
         ),
         "Training",
     )
@@ -602,7 +624,11 @@ def train_one(
     figure_dir = _figure_dir(cfg, model_name, appliance, augmented)
     graph_paths = _graph_paths(cfg, model_name, appliance, augmented)
     if bool(cfg.get("evaluation", {}).get("save_plots", True)):
-        plot_title = f"{model_name.upper()} {appliance} {'aug' if augmented else 'origin'} {cfg['data']['train_percent']}"
+        plot_title = (
+            f"{model_name.upper()} {appliance} rho={injection_rho}%"
+            if injection_rho is not None
+            else f"{model_name.upper()} {appliance} {'aug' if augmented else 'origin'} {cfg['data']['train_percent']}"
+        )
         _save_loss_curve(train_losses, val_losses, figure_dir, plot_title)
         _save_metric_summary(val_metrics, figure_dir, f"Validation metrics ({appliance})")
         _save_on_period_samples(model, val_loader, device, stats, on_thr_w, figure_dir, f"ON-period samples ({appliance})")
@@ -621,6 +647,7 @@ def train_one(
         "model": model_name.lower(),
         "appliance": appliance,
         "augmented": augmented,
+        "injection_rho": injection_rho,
         "train_csv": portable_path_str(train_csv),
         "val_csv": portable_path_str(val_csv),
         "val_mae": val_metrics["mae"],

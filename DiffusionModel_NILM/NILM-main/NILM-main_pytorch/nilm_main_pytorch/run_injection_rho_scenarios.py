@@ -1,18 +1,15 @@
 """
-Run all Geng paper scenarios × all appliances — train, test, save metrics, print tables.
+Run Geng-style injection-ratio experiment — train + test all rho × appliances.
 
-FCN (default) — 6 data scenarios × 5 appliances:
-  python -m nilm_main_pytorch.run_all_scenarios
-  python -m nilm_main_pytorch.run_all_scenarios --phase test
+Prerequisites:
+  cd DiffusionModel_NILM
+  python build_geng_rho_datasets.py
 
-EasyS2S (Tables 5–7) — same 6 scenarios:
-  python -m nilm_main_pytorch.run_all_scenarios --suite easy_s2s
-
-Table 8–9 models (S2P, FCN, AugLPN) — origin 200k + augmented 200k+200k:
-  python -m nilm_main_pytorch.run_all_scenarios --suite table8 --phase train_test
-
-Full grid (all models, all scenarios):
-  python -m nilm_main_pytorch.run_all_scenarios --suite all --phase train_test
+Then:
+  cd NILM-main/NILM-main_pytorch
+  python -m nilm_main_pytorch.run_injection_rho_scenarios
+  python -m nilm_main_pytorch.run_injection_rho_scenarios --phase test --rho 0 100
+  python -m nilm_main_pytorch.run_injection_rho_scenarios --model easy_s2s --no-ewma
 """
 
 from __future__ import annotations
@@ -20,7 +17,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# Allow running this file directly (IDE Run / full path) without `python -m ...`
 _PYTORCH_ROOT = Path(__file__).resolve().parent.parent
 if str(_PYTORCH_ROOT) not in sys.path:
     sys.path.insert(0, str(_PYTORCH_ROOT))
@@ -40,74 +36,48 @@ from nilm_main_pytorch.utils import (
     device_options_from_args,
     load_config,
     log_device,
-    merge_cli_config,
+    merge_rho_cli_config,
     portable_path_str,
     results_path,
     save_json,
 )
 
+DEFAULT_RHO_PCTS: tuple[int, ...] = (0, 25, 50, 100, 200)
+DEFAULT_N_REAL = 100_000
+
 
 @dataclass(frozen=True)
-class ScenarioSpec:
+class RhoScenarioSpec:
     scenario_id: str
     label: str
+    rho_pct: int
     model: str
-    train_percent: str
-    augmented: bool
+    n_real: int
+
+    @classmethod
+    def from_rho(cls, rho_pct: int, *, model: str, n_real: int) -> RhoScenarioSpec:
+        return cls(
+            scenario_id=f"rho_{rho_pct}",
+            label=f"rho={rho_pct}%",
+            rho_pct=int(rho_pct),
+            model=model,
+            n_real=int(n_real),
+        )
 
 
-# Six mix scenarios (REPRODUCTION_A.md) — model set per suite below.
-_MIX_SCENARIO_DEFS: tuple[tuple[str, str, str, bool], ...] = (
-    ("origin_100k", "Origin 100k", "10", False),
-    ("origin_200k", "Origin 200k", "20", False),
-    ("mix_100k_100k", "100k+100k", "10", True),
-    ("mix_200k_200k", "200k+200k", "20", True),
-    ("mix_100k_200k", "100k+200k", "10_20", True),
-    ("mix_200k_100k", "200k+100k", "20_10", True),
-)
-
-
-def _mix_scenarios(model: str) -> tuple[ScenarioSpec, ...]:
-    return tuple(
-        ScenarioSpec(sid, label, model, pct, aug)
-        for sid, label, pct, aug in _MIX_SCENARIO_DEFS
-    )
-
-
-FCN_SCENARIOS: tuple[ScenarioSpec, ...] = _mix_scenarios("fcn")
-
-# Tables 5–7: EasyS2S × all mix conditions (REPRODUCTION_A.md)
-EASY_S2S_SCENARIOS: tuple[ScenarioSpec, ...] = _mix_scenarios("easy_s2s")
-
-# Tables 8–9: S2P, FCN, AugLPN — origin 200k + augmented 200k+200k
-TABLE8_SCENARIOS: tuple[ScenarioSpec, ...] = tuple(
-    ScenarioSpec(
-        f"{'aug' if augmented else 'origin'}_200k_{model}",
-        f"{'Aug 200k+200k' if augmented else 'Origin 200k'} ({model})",
-        model,
-        "20",
-        augmented,
-    )
-    for model in ("s2p", "fcn", "auglpn")
-    for augmented in (False, True)
-)
-
-SUITES: dict[str, tuple[ScenarioSpec, ...]] = {
-    "fcn": FCN_SCENARIOS,
-    "easy_s2s": EASY_S2S_SCENARIOS,
-    "table8": TABLE8_SCENARIOS,
-    "all": FCN_SCENARIOS + EASY_S2S_SCENARIOS + TABLE8_SCENARIOS,
-}
-
-
-def _scenario_key(row: dict) -> str:
-    return str(row.get("scenario_id", row.get("scenario", "")))
+def build_scenarios(
+    rho_pcts: tuple[int, ...],
+    *,
+    model: str,
+    n_real: int,
+) -> tuple[RhoScenarioSpec, ...]:
+    return tuple(RhoScenarioSpec.from_rho(r, model=model, n_real=n_real) for r in rho_pcts)
 
 
 def run_all(
     cfg: dict,
     *,
-    suite: str,
+    scenarios: tuple[RhoScenarioSpec, ...],
     phase: str,
     appliances: tuple[str, ...],
     test_house: int,
@@ -115,7 +85,6 @@ def run_all(
     skip_errors: bool,
     verbose: bool,
 ) -> list[dict]:
-    scenarios = SUITES[suite]
     results: list[dict] = []
     total = len(scenarios) * len(appliances)
     done = 0
@@ -123,19 +92,16 @@ def run_all(
     for spec in scenarios:
         for appliance in appliances:
             done += 1
-            run_cfg = merge_cli_config(
+            run_cfg = merge_rho_cli_config(
                 cfg,
                 model=spec.model,
                 appliance=appliance,
-                augmented=spec.augmented,
-                train_percent=spec.train_percent,
-                data_root=None,
-                epochs=None,
+                rho_pct=spec.rho_pct,
+                n_real=spec.n_real,
             )
             tag = (
                 f"[{done}/{total}] {spec.model} | {appliance} | "
-                f"{spec.label} | pct={spec.train_percent} | "
-                f"{'aug' if spec.augmented else 'origin'}"
+                f"{spec.label} | n_real={spec.n_real:,}"
             )
             print(f"\n{'=' * 72}\n{tag}\n{'=' * 72}")
 
@@ -144,8 +110,10 @@ def run_all(
                 "scenario_label": spec.label,
                 "model": spec.model,
                 "appliance": appliance,
-                "train_percent": spec.train_percent,
-                "augmented": spec.augmented,
+                "rho_pct": spec.rho_pct,
+                "n_real": spec.n_real,
+                "n_syn": int(round(spec.rho_pct / 100.0 * spec.n_real)),
+                "augmented": spec.rho_pct > 0,
                 "test_house": test_house,
             }
 
@@ -194,10 +162,8 @@ def run_all(
                     )
                     row["status"] = "ok"
                     if not verbose:
-                        # One-line summary per run (what you want to record): TEST metrics.
                         print(
-                            f"RESULT {spec.model}/{appliance} "
-                            f"{'aug' if spec.augmented else 'origin'} pct={spec.train_percent} | "
+                            f"RESULT {spec.model}/{appliance} rho={spec.rho_pct}% | "
                             f"MAE {row['mae']:.2f}W | SAE {row['sae']:.4f} | F1 {row['f1']:.4f}",
                             flush=True,
                         )
@@ -211,8 +177,8 @@ def run_all(
                 results.append(row)
                 if not skip_errors:
                     print(
-                        "Hint: build missing mixes with "
-                        "cd DiffusionModel_NILM && python build_geng_mix.py --scenario missing",
+                        "Hint: build rho CSVs with "
+                        "cd DiffusionModel_NILM && python build_geng_rho_datasets.py",
                         flush=True,
                     )
                     raise
@@ -247,8 +213,8 @@ def _pivot_table(
     metric: str,
     title: str,
     appliances: tuple[str, ...],
-    scenario_labels: list[str],
-    scenario_ids: list[str],
+    rho_labels: list[str],
+    rho_ids: list[str],
 ) -> str:
     lookup: dict[tuple[str, str], dict] = {}
     for row in results:
@@ -257,17 +223,17 @@ def _pivot_table(
         key = (row["appliance"], row["scenario_id"])
         lookup[key] = row
 
-    col_w = max(12, max((len(s) for s in scenario_labels), default=10))
+    col_w = max(8, max((len(s) for s in rho_labels), default=6))
     app_w = max(16, max((len(a) for a in appliances), default=10))
 
-    lines = [title, "-" * (app_w + col_w * len(scenario_ids) + 2)]
-    header = f"{'appliance':<{app_w}}" + "".join(f"{lab:>{col_w}}" for lab in scenario_labels)
+    lines = [title, "-" * (app_w + col_w * len(rho_ids) + 2)]
+    header = f"{'appliance':<{app_w}}" + "".join(f"{lab:>{col_w}}" for lab in rho_labels)
     lines.append(header)
     lines.append("-" * len(header))
 
     for app in appliances:
         cells = [f"{app:<{app_w}}"]
-        for sid in scenario_ids:
+        for sid in rho_ids:
             row = lookup.get((app, sid))
             val = row.get(metric) if row else None
             cells.append(_fmt(val, col_w))
@@ -276,14 +242,23 @@ def _pivot_table(
     return "\n".join(lines)
 
 
-def format_summary_tables(
+def format_paper_ratio_tables(
     results: list[dict],
     *,
     appliances: tuple[str, ...],
-    scenarios: tuple[ScenarioSpec, ...],
+    scenarios: tuple[RhoScenarioSpec, ...],
+    model: str,
 ) -> str:
-    scenario_ids = [s.scenario_id for s in scenarios]
-    scenario_labels = [s.label for s in scenarios]
+    """ICSIMA-style blocks: Metric -> rho columns -> appliances rows."""
+    rho_ids = [s.scenario_id for s in scenarios]
+    rho_labels = [f"{s.rho_pct}%" for s in scenarios]
+    app_short = {
+        "washingmachine": "WM",
+        "dishwasher": "DW",
+        "fridge": "Fridge",
+        "microwave": "MW",
+        "kettle": "Kettle",
+    }
 
     ok = sum(1 for r in results if r.get("status") == "ok")
     skipped = sum(1 for r in results if r.get("status") == "skipped")
@@ -292,47 +267,49 @@ def format_summary_tables(
     parts = [
         "",
         "=" * 72,
-        "EXPERIMENT SUMMARY",
+        f"INJECTION RATIO SUMMARY ({model.upper()} — Geng concat)",
         "=" * 72,
         f"Total runs: {len(results)} | OK: {ok} | Skipped: {skipped} | Failed: {failed}",
+        f"rho = |D_s|/|D_r| | n_real = {scenarios[0].n_real:,}",
         "",
-        _pivot_table(
-            results,
-            metric="mae",
-            title="MAE (W) — test house 2",
-            appliances=appliances,
-            scenario_labels=scenario_labels,
-            scenario_ids=scenario_ids,
-        ),
-        "",
-        _pivot_table(
-            results,
-            metric="sae",
-            title="SAE (ratio)",
-            appliances=appliances,
-            scenario_labels=scenario_labels,
-            scenario_ids=scenario_ids,
-        ),
-        "",
-        _pivot_table(
-            results,
-            metric="f1",
-            title="F1",
-            appliances=appliances,
-            scenario_labels=scenario_labels,
-            scenario_ids=scenario_ids,
-        ),
-        "",
-        "DETAIL (all runs)",
-        "-" * 72,
-        f"{'scenario':<16} {'appliance':<16} {'MAE':>8} {'SAE':>8} {'F1':>8} {'status':<8}",
-        "-" * 72,
     ]
 
-    for row in sorted(results, key=lambda r: (_scenario_key(r), r.get("appliance", ""))):
+    for metric, metric_title in (
+        ("mae", "MAE (W)"),
+        ("sae", "SAE"),
+        ("f1", "F1"),
+    ):
+        parts.append(f"--- {metric_title} ---")
         parts.append(
-            f"{row.get('scenario_label', _scenario_key(row)):<16} "
-            f"{row.get('appliance', ''):<16} "
+            _pivot_table(
+                results,
+                metric=metric,
+                title="",
+                appliances=appliances,
+                rho_labels=rho_labels,
+                rho_ids=rho_ids,
+            )
+        )
+        parts.append("")
+
+    parts.extend(
+        [
+            "DETAIL (all runs)",
+            "-" * 72,
+            f"{'rho':<8} {'appliance':<16} {'MAE':>8} {'SAE':>8} {'F1':>8} {'status':<8}",
+            "-" * 72,
+        ]
+    )
+
+    for row in sorted(
+        results,
+        key=lambda r: (r.get("rho_pct", -1), r.get("appliance", "")),
+    ):
+        app = row.get("appliance", "")
+        short = app_short.get(app, app)
+        parts.append(
+            f"{row.get('rho_pct', ''):<8} "
+            f"{short:<16} "
             f"{_fmt(row.get('mae'), 8)} "
             f"{_fmt(row.get('sae'), 8)} "
             f"{_fmt(row.get('f1'), 8)} "
@@ -346,30 +323,35 @@ def format_summary_tables(
 def save_results_bundle(
     cfg: dict,
     *,
-    suite: str,
+    model: str,
     phase: str,
     test_house: int,
+    n_real: int,
     results: list[dict],
-    scenarios: tuple[ScenarioSpec, ...],
+    scenarios: tuple[RhoScenarioSpec, ...],
 ) -> tuple[Path, Path, Path]:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base = f"{suite}_{phase}_h{test_house}_{stamp}"
+    base = f"injection_rho_{model}_{phase}_h{test_house}_n{n_real // 1000}k_{stamp}"
 
     json_path = results_path(cfg, f"{base}.json")
     csv_path = results_path(cfg, f"{base}.csv")
     txt_path = results_path(cfg, f"{base}_table.txt")
 
     payload = {
-        "suite": suite,
+        "experiment": "geng_injection_ratio",
+        "model": model,
         "phase": phase,
         "test_house": test_house,
+        "n_real": n_real,
+        "rho_definition": "|D_s| / |D_r|",
         "scenarios": [
             {
                 "id": s.scenario_id,
                 "label": s.label,
+                "rho_pct": s.rho_pct,
+                "n_syn": int(round(s.rho_pct / 100.0 * s.n_real)),
                 "model": s.model,
-                "train_percent": s.train_percent,
-                "augmented": s.augmented,
+                "n_real": s.n_real,
             }
             for s in scenarios
         ],
@@ -383,7 +365,9 @@ def save_results_bundle(
         "scenario_label",
         "model",
         "appliance",
-        "train_percent",
+        "rho_pct",
+        "n_real",
+        "n_syn",
         "augmented",
         "test_house",
         "status",
@@ -399,13 +383,9 @@ def save_results_bundle(
         "val_sae",
         "val_f1",
         "checkpoint",
+        "train_csv",
         "figure_dir",
         "loss_curve_png",
-        "loss_curve_pdf",
-        "metric_summary_png",
-        "metric_summary_pdf",
-        "on_samples_png",
-        "on_samples_pdf",
         "error",
     ]
     with csv_path.open("w", newline="", encoding="utf-8") as f:
@@ -415,10 +395,11 @@ def save_results_bundle(
             writer.writerow(row)
 
     appliances_in_run = tuple(dict.fromkeys(r["appliance"] for r in results))
-    table_text = format_summary_tables(
+    table_text = format_paper_ratio_tables(
         results,
         appliances=appliances_in_run if appliances_in_run else ALL_APPLIANCES,
         scenarios=scenarios,
+        model=model,
     )
     txt_path.write_text(table_text, encoding="utf-8")
 
@@ -427,30 +408,34 @@ def save_results_bundle(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Run all Geng scenarios × all appliances; save metrics and print tables",
+        description="Train + test Geng injection-ratio grid (rho × appliances)",
     )
     p.add_argument("--config", type=Path, default=None)
-    p.add_argument("--suite", choices=list(SUITES.keys()), default="fcn")
+    p.add_argument("--model", choices=["easy_s2s", "s2p", "fcn", "auglpn"], default="easy_s2s")
+    p.add_argument(
+        "--rho",
+        type=int,
+        nargs="+",
+        default=list(DEFAULT_RHO_PCTS),
+        help="Injection ratios in percent (default: 0 25 50 100 200)",
+    )
+    p.add_argument(
+        "--n-real",
+        type=int,
+        default=DEFAULT_N_REAL,
+        help="Real block size |D_r| — must match build_geng_rho_datasets.py",
+    )
     p.add_argument(
         "--phase",
         choices=["train", "test", "train_test"],
         default="train_test",
-        help="train_test = train each run then evaluate on test house (default)",
     )
     p.add_argument("--appliance", choices=list(ALL_APPLIANCES), default=None)
     p.add_argument("--test-house", type=int, choices=[1, 2], default=2)
-    p.add_argument("--ewma", action="store_true", help="Force EWMA on augmented runs")
-    p.add_argument("--no-ewma", action="store_true")
-    p.add_argument(
-        "--skip-errors",
-        action="store_true",
-        help="Continue if a run fails or data/checkpoint is missing",
-    )
-    p.add_argument(
-        "--quiet",
-        action="store_true",
-        help="Hide per-epoch training/validation logs (default: show all information)",
-    )
+    p.add_argument("--ewma", action="store_true", help="Force EWMA when rho > 0")
+    p.add_argument("--no-ewma", action="store_true", help="Disable EWMA (recommended for paper)")
+    p.add_argument("--skip-errors", action="store_true")
+    p.add_argument("--quiet", action="store_true")
     add_device_cli_args(p)
     return p.parse_args()
 
@@ -465,8 +450,10 @@ def main() -> None:
         cfg["training"]["gpu_id"] = gpu_id
     if require_cuda is not None:
         cfg["training"]["require_cuda"] = require_cuda
+
+    rho_pcts = tuple(sorted(set(int(r) for r in args.rho)))
     appliances = (args.appliance,) if args.appliance else ALL_APPLIANCES
-    scenarios = SUITES[args.suite]
+    scenarios = build_scenarios(rho_pcts, model=args.model, n_real=args.n_real)
 
     use_ewma = None
     if args.ewma:
@@ -474,16 +461,19 @@ def main() -> None:
     if args.no_ewma:
         use_ewma = False
 
-    print(f"Suite: {args.suite} | Phase: {args.phase} | Appliances: {', '.join(appliances)}")
+    print(f"Experiment: Geng injection ratio | Model: {args.model}")
+    print(f"Phase: {args.phase} | rho: {rho_pcts} | n_real: {args.n_real:,}")
+    print(f"Appliances: {', '.join(appliances)}")
     print(f"Data root: {portable_path_str(data_root_path(cfg))}")
     log_device(cfg)
-    print(f"Scenarios ({len(scenarios)}):")
+    print("Scenarios:")
     for s in scenarios:
-        print(f"  - {s.label} ({s.model}, pct={s.train_percent}, aug={s.augmented})")
+        n_syn = int(round(s.rho_pct / 100.0 * s.n_real))
+        print(f"  - {s.label} (real={s.n_real:,}, syn={n_syn:,})")
 
     results = run_all(
         cfg,
-        suite=args.suite,
+        scenarios=scenarios,
         phase=args.phase,
         appliances=appliances,
         test_house=args.test_house,
@@ -492,19 +482,20 @@ def main() -> None:
         verbose=not args.quiet,
     )
 
-    appliances_in_run = tuple(dict.fromkeys(r["appliance"] for r in results))
-    summary = format_summary_tables(
+    summary = format_paper_ratio_tables(
         results,
-        appliances=appliances_in_run if appliances_in_run else appliances,
+        appliances=appliances,
         scenarios=scenarios,
+        model=args.model,
     )
     print(summary)
 
     json_path, csv_path, txt_path = save_results_bundle(
         cfg,
-        suite=args.suite,
+        model=args.model,
         phase=args.phase,
         test_house=args.test_house,
+        n_real=args.n_real,
         results=results,
         scenarios=scenarios,
     )

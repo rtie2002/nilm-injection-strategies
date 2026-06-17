@@ -196,11 +196,21 @@ def norm_stats(appliance: str) -> dict:
     }
 
 
-def checkpoint_path(cfg: dict, model_name: str, appliance: str, augmented: bool) -> Path:
-    tag = "aug" if augmented else "origin"
+def experiment_run_suffix(cfg: dict, *, augmented: bool | None = None) -> str:
+    """Checkpoint / figure suffix for Geng reproduction or rho injection runs."""
+    rho = cfg.get("data", {}).get("injection_rho")
+    if rho is not None:
+        return f"rho{int(rho)}"
+    is_aug = bool(cfg["data"]["augmented"]) if augmented is None else augmented
     pct = str(cfg["data"]["train_percent"])
+    tag = "aug" if is_aug else "origin"
+    return f"{tag}_{pct}"
+
+
+def checkpoint_path(cfg: dict, model_name: str, appliance: str, augmented: bool) -> Path:
     ckpt_dir = checkpoint_dir_path(cfg)
-    return ckpt_dir / f"{model_name.lower()}_{appliance}_{tag}_{pct}.pt"
+    suffix = experiment_run_suffix(cfg, augmented=augmented)
+    return ckpt_dir / f"{model_name.lower()}_{appliance}_{suffix}.pt"
 
 
 def results_path(cfg: dict, name: str) -> Path:
@@ -258,6 +268,37 @@ def merge_cli_config(
     # Keep relative paths in cfg; resolve at use-time via data_root_path()
     if epochs is not None:
         out["training"]["epochs"] = epochs
+    return out
+
+
+def merge_rho_cli_config(
+    cfg: dict,
+    *,
+    model: str,
+    appliance: str,
+    rho_pct: int,
+    n_real: int = 100_000,
+    data_root: str | None = None,
+    epochs: int | None = None,
+    device: str | None = None,
+    gpu_id: int | None = None,
+    require_cuda: bool | None = None,
+) -> dict:
+    """Config for Geng-style injection-ratio experiment (build_geng_rho_datasets.py)."""
+    out = merge_cli_config(
+        cfg,
+        model=model,
+        appliance=appliance,
+        augmented=int(rho_pct) > 0,
+        train_percent=str(int(rho_pct)),
+        data_root=data_root,
+        epochs=epochs,
+        device=device,
+        gpu_id=gpu_id,
+        require_cuda=require_cuda,
+    )
+    out["data"]["injection_rho"] = int(rho_pct)
+    out["data"]["n_real"] = int(n_real)
     return out
 
 

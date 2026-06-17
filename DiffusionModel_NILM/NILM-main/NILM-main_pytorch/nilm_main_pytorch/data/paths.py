@@ -12,6 +12,16 @@ def appliance_dir(data_root: Path, appliance: str) -> Path:
     return data_root / appliance
 
 
+def geng_rho_train_csv_path(
+    data_root: Path,
+    appliance: str,
+    rho_pct: int,
+    dataset_name: str = "UK_DALE",
+) -> Path:
+    """Geng injection-ratio CSV from build_geng_rho_datasets.py."""
+    return appliance_dir(data_root, appliance) / f"{dataset_name}Combined{appliance}_rho{int(rho_pct)}.csv"
+
+
 def train_csv_path(
     data_root: Path,
     appliance: str,
@@ -19,8 +29,11 @@ def train_csv_path(
     origin: bool,
     train_percent: str = "20",
     dataset_name: str = "UK_DALE",
+    injection_rho: int | None = None,
 ) -> Path:
     app_dir = appliance_dir(data_root, appliance)
+    if injection_rho is not None:
+        return geng_rho_train_csv_path(data_root, appliance, injection_rho, dataset_name)
     if origin:
         name = f"{appliance}_{train_percent}training_.csv"
     else:
