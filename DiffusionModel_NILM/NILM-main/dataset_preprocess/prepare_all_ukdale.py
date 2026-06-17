@@ -589,7 +589,7 @@ def main() -> None:
         print("\nNext steps:")
         print("  1. build_geng_mix.py --splits-only   (6:2:2 + origin crops from pools)")
         print("  2. algorithm1.py                     (diffusion train data)")
-        print("  3. run_diffusion_all.py + build_geng_mix.py (mix scenarios)")
+        print("  3. build_geng_mix.py                  (auto split + mix in one command)")
     else:
         print("\nNext steps (paper-exact):")
         print("  1. algorithm1.py                     (diffusion: uses {app}_training_.csv)")

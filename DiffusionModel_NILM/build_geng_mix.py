@@ -1,16 +1,20 @@
 """
-Geng et al. (Energy 2025) — splits, npy -> synthetic, paper mix scenarios.
+Geng et al. (Energy 2025) — one command: pool split + synthetic mix scenarios.
 
-Paper-exact (full timeline, Geng Tables 5–9):
-  1. python NILM-main/dataset_preprocess/prepare_all_ukdale.py --paper-exact
-  2. algorithm1.py + run_diffusion_all.py
-  3. python build_geng_mix.py --paper-exact
+One-click (auto-detects pool vs paper-exact from prepare_all_ukdale.py):
 
-Pool mode (first 400k rows, stable val):
-  1. prepare_all_ukdale.py
-  2. build_geng_mix.py --splits-only
-  3. algorithm1.py + run_diffusion_all.py
-  4. build_geng_mix.py
+  cd DiffusionModel_NILM
+  python build_geng_mix.py
+
+Prepare data first:
+  Pool (default):     python NILM-main/dataset_preprocess/prepare_all_ukdale.py
+  Paper-exact:        python NILM-main/dataset_preprocess/prepare_all_ukdale.py --paper-exact
+
+Then diffusion: algorithm1.py + run_diffusion_all.py
+
+build_geng_mix.py automatically:
+  - pool mode: split house pools 6:2:2 + crops, then build UK_DALECombined* mixes
+  - paper-exact: skip split (already done), build mixes only
 """
 
 from __future__ import annotations
@@ -186,18 +190,116 @@ def pool_path(train_root: Path, appliance: str, house: int) -> Path:
     return train_root / appliance / pool_csv_name(appliance, house)
 
 
-def has_paper_exact_splits(train_root: Path, appliance: str) -> bool:
+PAPER_EXACT_REQUIRED = (
+    "{app}_training_.csv",
+    "{app}_validation_.csv",
+    "{app}_10training_.csv",
+    "{app}_20training_.csv",
+)
+
+
+def missing_paper_exact_files(train_root: Path, appliance: str) -> list[str]:
     app_dir = train_root / appliance
-    return (
-        (app_dir / f"{appliance}_training_.csv").is_file()
-        and (app_dir / f"{appliance}_validation_.csv").is_file()
-        and (app_dir / f"{appliance}_10training_.csv").is_file()
-        and (app_dir / f"{appliance}_20training_.csv").is_file()
-    )
+    missing: list[str] = []
+    for pattern in PAPER_EXACT_REQUIRED:
+        path = app_dir / pattern.format(app=appliance)
+        if not path.is_file():
+            missing.append(pattern.format(app=appliance))
+    return missing
+
+
+def has_paper_exact_splits(train_root: Path, appliance: str) -> bool:
+    return not missing_paper_exact_files(train_root, appliance)
 
 
 def all_have_paper_exact_splits(train_root: Path, appliances: tuple[str, ...]) -> bool:
     return all(has_paper_exact_splits(train_root, app) for app in appliances)
+
+
+def format_paper_exact_missing_report(train_root: Path, appliances: tuple[str, ...]) -> str:
+    lines = [f"  train root: {train_root}"]
+    if not train_root.is_dir():
+        lines.append("  (directory does not exist)")
+        return "\n".join(lines)
+    for app in appliances:
+        missing = missing_paper_exact_files(train_root, app)
+        if missing:
+            lines.append(f"  [{app}] MISSING: {', '.join(missing)}")
+        else:
+            lines.append(f"  [{app}] OK")
+    return "\n".join(lines)
+
+
+def has_pool_csvs(train_root: Path, appliances: tuple[str, ...]) -> bool:
+    return all(pool_path(train_root, app, 2).is_file() for app in appliances)
+
+
+def read_preprocess_mode(train_root: Path) -> str | None:
+    manifest_path = train_root / "preprocessing_manifest.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return data.get("mode")
+
+
+def resolve_data_mode(
+    train_root: Path,
+    appliances: tuple[str, ...],
+    *,
+    prefer_paper_exact: bool,
+) -> str:
+    """Return 'pool' or 'paper_exact'. Auto-detect from files + manifest."""
+    pools_ok = has_pool_csvs(train_root, appliances)
+    paper_ok = all_have_paper_exact_splits(train_root, appliances)
+    manifest_mode = read_preprocess_mode(train_root)
+
+    if manifest_mode == "paper_exact" and paper_ok:
+        return "paper_exact"
+    if manifest_mode == "pool_only" and pools_ok:
+        if prefer_paper_exact:
+            print(
+                "  note: preprocessing_manifest says pool_only; "
+                "using pool mode (split + mix in one run)"
+            )
+        return "pool"
+
+    if paper_ok and not pools_ok:
+        return "paper_exact"
+    if pools_ok and not paper_ok:
+        if prefer_paper_exact:
+            print(
+                "  note: only pool CSVs found (*_house2_pool.csv); "
+                "auto split 6:2:2 then mix (not --paper-exact)"
+            )
+        return "pool"
+    if paper_ok and pools_ok:
+        # Both on disk: manifest wins, else paper-exact if splits complete
+        if manifest_mode == "pool_only":
+            return "pool"
+        return "paper_exact"
+
+    if prefer_paper_exact:
+        report = format_paper_exact_missing_report(train_root, appliances)
+        raise FileNotFoundError(
+            "Paper-exact requested but required CSVs are missing.\n"
+            f"{report}\n\n"
+            "Run: python NILM-main/dataset_preprocess/prepare_all_ukdale.py --paper-exact"
+        )
+
+    pool_missing = [
+        pool_csv_name(app, 2) for app in appliances if not pool_path(train_root, app, 2).is_file()
+    ]
+    raise FileNotFoundError(
+        "No usable UK_DALE CSVs found.\n"
+        f"  train root: {train_root}\n"
+        f"  missing pools: {', '.join(pool_missing) if pool_missing else 'n/a'}\n\n"
+        "Run one of:\n"
+        "  python NILM-main/dataset_preprocess/prepare_all_ukdale.py\n"
+        "  python NILM-main/dataset_preprocess/prepare_all_ukdale.py --paper-exact"
+    )
 
 
 def print_paper_exact_status(train_root: Path, appliances: tuple[str, ...]) -> None:
@@ -655,12 +757,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--paper-exact",
         action="store_true",
-        help="Use CSVs from prepare_all_ukdale.py --paper-exact (skip pool split step)",
+        help="Prefer paper-exact splits if present; if only pool CSVs exist, auto split+mix",
     )
     p.add_argument(
         "--splits-only",
         action="store_true",
-        help="Only split house pools → train/val/test + origin crops (no npy mix)",
+        help="Only split pools → train/val/test (optional; default also builds mixes)",
     )
     p.add_argument(
         "--force-splits",
@@ -743,36 +845,28 @@ def main() -> None:
     if args.validation_percent + args.test_percent >= 100:
         raise ValueError("validation-percent + test-percent must be < 100")
 
-    paper_exact = args.paper_exact or all_have_paper_exact_splits(args.train_root, appliances)
+    data_mode = resolve_data_mode(
+        args.train_root,
+        appliances,
+        prefer_paper_exact=args.paper_exact,
+    )
 
     if args.splits_only:
         scenarios_for_crops: tuple[GengMixScenario, ...] = GENG_MIX_SCENARIOS
     else:
         scenarios_for_crops = resolve_scenarios(args, appliances=appliances, train_root=args.train_root)
 
-    print("Geng mix builder")
+    print("Geng mix builder (one-click)")
     print(f"  train root:  {_rel(args.train_root)}")
     print(f"  appliances:  {appliances}")
-    if paper_exact:
-        print("  mode: paper-exact (full timeline splits from prepare_all_ukdale.py)")
+    print(f"  data mode:   {data_mode}")
+    if data_mode == "paper_exact":
         print_paper_exact_status(args.train_root, appliances)
-    elif args.splits_only:
-        print("  mode: splits-only (from house pools)")
-    else:
+    elif not args.splits_only:
         print(f"  scenarios:   {[s.name for s in scenarios_for_crops]}")
     print()
 
-    if not paper_exact:
-        pool_missing = verify_pool_outputs(args.train_root, appliances)
-        if pool_missing and not any(
-            has_paper_exact_splits(args.train_root, app) for app in appliances
-        ):
-            raise FileNotFoundError(
-                "No pool CSVs and no paper-exact training CSVs.\n"
-                "  Paper: python NILM-main/dataset_preprocess/prepare_all_ukdale.py --paper-exact\n"
-                "  Pool:  python NILM-main/dataset_preprocess/prepare_all_ukdale.py"
-            )
-
+    if data_mode == "pool":
         ensure_geng_splits(
             appliances,
             args.train_root,
@@ -785,11 +879,11 @@ def main() -> None:
         )
         print()
     elif not all_have_paper_exact_splits(args.train_root, appliances):
-        missing_apps = [a for a in appliances if not has_paper_exact_splits(args.train_root, a)]
+        report = format_paper_exact_missing_report(args.train_root, appliances)
         raise FileNotFoundError(
-            "Paper-exact mode but missing split CSVs for: "
-            + ", ".join(missing_apps)
-            + "\n  Run: python NILM-main/dataset_preprocess/prepare_all_ukdale.py --paper-exact"
+            "Paper-exact mode but required split CSVs are missing.\n"
+            f"{report}\n\n"
+            "Fix: cd NILM-main/dataset_preprocess && python prepare_all_ukdale.py --paper-exact"
         )
 
     if args.splits_only:
