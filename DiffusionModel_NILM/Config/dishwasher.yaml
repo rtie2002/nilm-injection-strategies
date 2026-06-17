@@ -3,14 +3,14 @@ model:
   params:
     seq_length: 512
     feature_size: 1
-    n_layer_enc: 2
-    n_layer_dec: 2
-    d_model: 128
+    n_layer_enc: 3
+    n_layer_dec: 3
+    d_model: 256
     timesteps: 2000
     sampling_timesteps: 2000
     loss_type: 'l1'
     beta_schedule: 'cosine'
-    n_heads: 4
+    n_heads: 8
     mlp_hidden_times: 4
     attn_pd: 0.0
     resid_pd: 0.0
@@ -52,6 +52,6 @@ dataloader:
       seed: 2024
       period: train
 
-  batch_size: 64
+  batch_size: 128
   sample_size: 256
   shuffle: False
