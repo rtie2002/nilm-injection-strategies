@@ -1,11 +1,19 @@
 r"""
-Visualize Geng NILM CSV files in z-score space (what EasyS2S trains on).
+Visualize Geng NILM CSV files in real power (watts).
+
+Loads z-score or watts CSVs, denormalizes with the same constants as
+prepare_all_ukdale.py / build_geng_mix.py, then plots aggregate and appliance
+power in watts.
 
 Supports:
   - Standard Geng CSVs (2 columns, no header): aggregate_z, appliance_z
     e.g. kettle_validation_.csv, UK_DALECombinedkettle_file20.csv
-  - Labeled mix CSVs (watts + source): converted to z-score for display
+  - Labeled mix CSVs (watts + source)
     e.g. UK_DALECombinedkettle_file20_labeled.csv
+
+Denormalization (inverse of z-score):
+  aggregate_W = aggregate_z * AGG_STD + AGG_MEAN
+  appliance_W = appliance_z * app_std + app_mean
 
 Examples:
     python data/real_power_visualize_zscore.py --path DiffusionModel_NILM/NILM-main/dataset_preprocess/created_data/UK_DALE/kettle/kettle_validation_.csv
@@ -54,21 +62,17 @@ REAL_COLOR = "#c8f7c5"
 SYN_COLOR = "#ffd6d6"
 
 
-def norm_on_threshold_z(appliance: str) -> float:
-    p = APPLIANCE_PARAMS[appliance]
-    return (p["on_power_threshold"] - p["mean"]) / p["std"]
-
-
-def watts_to_zscore(df_w: pd.DataFrame, appliance: str) -> pd.DataFrame:
+def zscore_to_watts(df_z: pd.DataFrame, appliance: str) -> pd.DataFrame:
+    """Inverse of prepare_all_ukdale.zscore_normalize (matches build_geng_mix.zscore_rows_to_watts)."""
     p = APPLIANCE_PARAMS[appliance]
     out = pd.DataFrame(
         {
-            "aggregate": (df_w["aggregate"].to_numpy(dtype=np.float64) - AGG_MEAN) / AGG_STD,
-            appliance: (df_w[appliance].to_numpy(dtype=np.float64) - p["mean"]) / p["std"],
+            "aggregate": df_z["aggregate"].to_numpy(dtype=np.float64) * AGG_STD + AGG_MEAN,
+            appliance: df_z[appliance].to_numpy(dtype=np.float64) * p["std"] + p["mean"],
         }
     )
-    if "source" in df_w.columns:
-        out["source"] = df_w["source"].to_numpy(dtype=np.int32)
+    if "source" in df_z.columns:
+        out["source"] = df_z["source"].to_numpy(dtype=np.int32)
     return out
 
 
@@ -111,8 +115,14 @@ def resolve_csv_path(path_str: str) -> Path:
     raise FileNotFoundError(f"CSV not found: {raw}\nTried:\n  {tried}")
 
 
-def load_zscore_frame(file_path: Path) -> tuple[pd.DataFrame, str | None, str]:
-    """Return (dataframe in z-score, appliance name, load mode label)."""
+def _looks_like_watts(aggregate: np.ndarray) -> bool:
+    """Geng z-score aggregate rarely exceeds ~3; mains power in watts is hundreds+."""
+    sample = aggregate[: min(5000, len(aggregate))]
+    return bool(np.nanmax(np.abs(sample)) > 20.0)
+
+
+def load_watts_frame(file_path: Path) -> tuple[pd.DataFrame, str | None, str]:
+    """Return (dataframe in watts, appliance name, load mode label)."""
     # Try headerless Geng NILM CSV first (2 z-score columns).
     try:
         raw = pd.read_csv(file_path, header=None, nrows=5)
@@ -122,13 +132,17 @@ def load_zscore_frame(file_path: Path) -> tuple[pd.DataFrame, str | None, str]:
                 appliance = detect_appliance(file_path, [])
                 if appliance is None:
                     raise ValueError("Could not infer appliance from filename.")
-                df = df.iloc[:, :2].copy()
-                df.columns = ["aggregate", appliance]
-                return df, appliance, "z-score (2-col, no header)"
+                df_z = df.iloc[:, :2].copy()
+                df_z.columns = ["aggregate", appliance]
+                return (
+                    zscore_to_watts(df_z, appliance),
+                    appliance,
+                    "z-score (2-col, no header) -> watts",
+                )
     except (pd.errors.ParserError, ValueError):
         pass
 
-    # Labeled or other CSV with headers (often watts).
+    # Labeled or other CSV with headers (watts or z-score).
     df = pd.read_csv(file_path)
     appliance = detect_appliance(file_path, list(df.columns))
     if appliance is None:
@@ -137,19 +151,21 @@ def load_zscore_frame(file_path: Path) -> tuple[pd.DataFrame, str | None, str]:
     if "aggregate" not in df.columns or appliance not in df.columns:
         raise ValueError(f"Expected columns aggregate and {appliance} in {file_path.name}")
 
-    # Heuristic: Geng z-score aggregate rarely exceeds ~3; watts mains are hundreds+.
-    agg_sample = df["aggregate"].iloc[: min(5000, len(df))].to_numpy(dtype=np.float64)
-    if np.nanmax(np.abs(agg_sample)) > 20.0:
-        return watts_to_zscore(df, appliance), appliance, "watts -> z-score (labeled/header CSV)"
+    agg = df["aggregate"].iloc[: min(5000, len(df))].to_numpy(dtype=np.float64)
+    if _looks_like_watts(agg):
+        out = df[["aggregate", appliance]].copy()
+        if "source" in df.columns:
+            out["source"] = df["source"].astype(int)
+        return out, appliance, "watts (header CSV)"
 
-    out = df[["aggregate", appliance]].copy()
+    out_z = df[["aggregate", appliance]].copy()
     if "source" in df.columns:
-        out["source"] = df["source"].astype(int)
-    return out, appliance, "z-score (header CSV)"
+        out_z["source"] = df["source"].astype(int)
+    return zscore_to_watts(out_z, appliance), appliance, "z-score (header CSV) -> watts"
 
 
-def find_on_segments_z(appliance_z: np.ndarray, threshold_z: float) -> list[tuple[int, int, int]]:
-    mask = (np.asarray(appliance_z, dtype=np.float64) > threshold_z).astype(int)
+def find_on_segments_w(appliance_w: np.ndarray, threshold_w: float) -> list[tuple[int, int, int]]:
+    mask = (np.asarray(appliance_w, dtype=np.float64) > threshold_w).astype(int)
     diff = np.diff(np.concatenate([[0], mask, [0]]))
     starts = np.where(diff == 1)[0]
     ends = np.where(diff == -1)[0]
@@ -166,30 +182,41 @@ def find_source_segments(source: np.ndarray, value: int) -> list[tuple[int, int]
 
 def interactive_viewer(file_path: Path, initial_span: int = 1024) -> None:
     print(f"\nLoading: {file_path}")
-    df, appliance, mode = load_zscore_frame(file_path)
+    df, appliance, mode = load_watts_frame(file_path)
     total_points = len(df)
     if total_points == 0:
         print("CSV is empty.")
         return
 
     assert appliance is not None
-    threshold_z = norm_on_threshold_z(appliance)
-    on_segments = find_on_segments_z(df[appliance].to_numpy(), threshold_z)
+    params = APPLIANCE_PARAMS[appliance]
+    threshold_w = params["on_power_threshold"]
+    on_segments = find_on_segments_w(df[appliance].to_numpy(), threshold_w)
 
     has_source = "source" in df.columns
     real_segments = find_source_segments(df["source"].to_numpy(), 0) if has_source else []
     syn_segments = find_source_segments(df["source"].to_numpy(), 1) if has_source else []
 
     sequences = {
-        "aggregate (z)": df["aggregate"].to_numpy(dtype=np.float64),
-        f"{appliance} (z)": df[appliance].to_numpy(dtype=np.float64),
+        "aggregate (W)": df["aggregate"].to_numpy(dtype=np.float64),
+        f"{appliance} (W)": df[appliance].to_numpy(dtype=np.float64),
     }
 
+    agg_w = sequences["aggregate (W)"]
+    app_w = sequences[f"{appliance} (W)"]
     print(f"Mode: {mode}")
     print(f"Total points: {total_points:,}")
     print(f"Appliance: {appliance}")
-    print(f"ON threshold (z): {threshold_z:.4f}  (= {APPLIANCE_PARAMS[appliance]['on_power_threshold']:.0f} W)")
-    print(f"ON segments (z > thr): {len(on_segments):,}")
+    print(
+        f"Denorm: aggregate = z*{AGG_STD:.0f}+{AGG_MEAN:.0f} | "
+        f"{appliance} = z*{params['std']:.0f}+{params['mean']:.0f}"
+    )
+    print(f"ON threshold: {threshold_w:.0f} W")
+    print(
+        f"Range aggregate: [{np.nanmin(agg_w):.1f}, {np.nanmax(agg_w):.1f}] W | "
+        f"{appliance}: [{np.nanmin(app_w):.1f}, {np.nanmax(app_w):.1f}] W"
+    )
+    print(f"ON segments (power > thr): {len(on_segments):,}")
     if has_source:
         n_real = int((df["source"] == 0).sum())
         n_syn = int((df["source"] == 1).sum())
@@ -227,8 +254,14 @@ def interactive_viewer(file_path: Path, initial_span: int = 1024) -> None:
         )
         lines[label] = line
 
-    ax.axhline(threshold_z, color="#2ca02c", linestyle="--", linewidth=1.0, alpha=0.7, label=f"ON thr z={threshold_z:.3f}")
-    ax.axhline(0.0, color="#888888", linestyle=":", linewidth=0.8, alpha=0.6)
+    ax.axhline(
+        threshold_w,
+        color="#2ca02c",
+        linestyle="--",
+        linewidth=1.0,
+        alpha=0.7,
+        label=f"ON thr {threshold_w:.0f} W",
+    )
 
     legend = ax.legend(loc="upper right", fontsize=9)
     for legline in legend.get_lines():
@@ -237,7 +270,7 @@ def interactive_viewer(file_path: Path, initial_span: int = 1024) -> None:
 
     ax.grid(True, alpha=0.3)
     ax.set_xlabel("Sample index (6 s per row)")
-    ax.set_ylabel("Z-score")
+    ax.set_ylabel("Power (W)")
 
     max_start = max(0, total_points - 1)
     pos_slider = Slider(plt.axes([0.1, 0.12, 0.5, 0.03]), "Start", 0, max_start, valinit=0, valstep=1, valfmt="%d")
@@ -277,7 +310,7 @@ def interactive_viewer(file_path: Path, initial_span: int = 1024) -> None:
 
         ax.set_xlim(state["start_idx"], max(state["start_idx"] + 1, end))
         ax.set_title(
-            f"{file_path.name} | z-score | {state['start_idx']:,}–{end:,} | span {state['view_span']:,}",
+            f"{file_path.name} | watts | {state['start_idx']:,}–{end:,} | span {state['view_span']:,}",
             fontsize=11,
         )
 
@@ -417,9 +450,9 @@ def choose_file(root: Path) -> Path | None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Interactive viewer for Geng NILM CSVs in z-score space (model input scale)."
+        description="Interactive viewer for Geng NILM CSVs in real power (watts)."
     )
-    parser.add_argument("--path", type=str, default=None, help="CSV path (2-col z-score or labeled watts)")
+    parser.add_argument("--path", type=str, default=None, help="CSV path (2-col z-score or labeled/header watts)")
     parser.add_argument("--span", type=int, default=1024, help="Initial window length in samples")
     parser.add_argument(
         "--browse",
