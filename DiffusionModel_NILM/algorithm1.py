@@ -7,7 +7,7 @@ applies MinMaxScaler + [-1, 1] on load (see Utils/Data_utils/real_datasets.py).
 
 Use --paper_minmax to also run paper steps 11–12 before saving (usually redundant).
 
-Input:  {appliance}_training_.csv from prepare_all_ukdale.py (z-score, 2 cols)
+Input:  {appliance}_training_.csv (from build_geng_mix.py --splits-only, or legacy prepare_all)
 Output: Data/datasets/{appliance}.csv  (header: power, values in watts by default)
 
 Usage:

@@ -1,32 +1,16 @@
 """
-Geng et al. (Energy 2025) — one-click npy -> X/Y synthetic -> all paper mix scenarios.
+Geng et al. (Energy 2025) — splits, npy -> synthetic, paper mix scenarios.
 
-Paper mix scenarios (origin CSVs come from prepare_all_ukdale.py only):
-  Origin 100k  -> {app}_10training_.csv             (real only, already exists)
-  Origin 200k  -> {app}_20training_.csv             (real only, already exists)
-  100k + 100k  -> UK_DALECombined{app}_file10.csv    (built here)
-  200k + 200k  -> UK_DALECombined{app}_file20.csv   (built here)
-  100k + 200k  -> UK_DALECombined{app}_file10_20.csv (built here)
-  200k + 100k  -> UK_DALECombined{app}_file20_10.csv (built here)
+Paper-exact (full timeline, Geng Tables 5–9):
+  1. python NILM-main/dataset_preprocess/prepare_all_ukdale.py --paper-exact
+  2. algorithm1.py + run_diffusion_all.py
+  3. python build_geng_mix.py --paper-exact
 
-Also writes labeled inspection CSV (watts, row order = concat only; NILM shuffles at train time):
-  UK_DALECombined{app}_file{label}_labeled.csv
-  source: 0 = real (first block), 1 = synthetic (second block)
-
-Visualize: python ../data/geng_mix_visualize.py <labeled_csv>
-
-Val/test CSVs also come from prepare_all_ukdale.py (unchanged).
-
-One-click (all appliances, all mix scenarios):
-  cd DiffusionModel_NILM
-  python build_geng_mix.py
-
-Single / missing scenarios:
-  python build_geng_mix.py --scenario 20
-  python build_geng_mix.py --scenario 10_20
-  python build_geng_mix.py --scenario 20_10
-  python build_geng_mix.py --scenario missing   # only file10/20/10_20/20_10 not on disk
-  python build_geng_mix.py --appliance kettle --n-real 200000 --n-syn 200000
+Pool mode (first 400k rows, stable val):
+  1. prepare_all_ukdale.py
+  2. build_geng_mix.py --splits-only
+  3. algorithm1.py + run_diffusion_all.py
+  4. build_geng_mix.py
 """
 
 from __future__ import annotations
@@ -48,9 +32,15 @@ from prepare_all_ukdale import (  # noqa: E402
     AGG_MEAN,
     AGG_STD,
     ALL_APPLIANCES,
+    DEFAULT_TEST_PCT,
+    DEFAULT_VAL_PCT,
     PARAMS,
     align_and_resample,
     crop_label,
+    load_pool_csv,
+    pool_csv_name,
+    rows_to_days,
+    split_chronological,
     zscore_normalize,
 )
 
@@ -106,7 +96,13 @@ GENG_MIX_SCENARIOS: tuple[GengMixScenario, ...] = (
     GengMixScenario("200k+100k", 200_000, 100_000, mix_file_label="20_10"),
 )
 
-# Supporting files from prepare_all_ukdale (not rebuilt here).
+# Pool CSVs from prepare_all_ukdale.py (pool-only mode).
+GENG_POOL_CSVS = (
+    "{app}_house2_pool.csv",
+    "{app}_house1_pool.csv",
+)
+
+# Experiment CSVs written by ensure_geng_splits() or legacy prepare_all.
 GENG_SUPPORT_CSVS = (
     "{app}_training_.csv",
     "{app}_validation_.csv",
@@ -177,6 +173,164 @@ def resolve_scenarios(
     return GENG_MIX_SCENARIOS
 
 
+def save_zscore_csv(df: pd.DataFrame, path: Path, dry_run: bool = False) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if dry_run:
+        print(f"  [dry-run] would write {_rel(path)} ({len(df):,} rows)")
+        return
+    df.to_csv(path, index=False, header=False)
+    print(f"  wrote {_rel(path)} ({len(df):,} rows)")
+
+
+def pool_path(train_root: Path, appliance: str, house: int) -> Path:
+    return train_root / appliance / pool_csv_name(appliance, house)
+
+
+def has_paper_exact_splits(train_root: Path, appliance: str) -> bool:
+    app_dir = train_root / appliance
+    return (
+        (app_dir / f"{appliance}_training_.csv").is_file()
+        and (app_dir / f"{appliance}_validation_.csv").is_file()
+        and (app_dir / f"{appliance}_10training_.csv").is_file()
+        and (app_dir / f"{appliance}_20training_.csv").is_file()
+    )
+
+
+def all_have_paper_exact_splits(train_root: Path, appliances: tuple[str, ...]) -> bool:
+    return all(has_paper_exact_splits(train_root, app) for app in appliances)
+
+
+def print_paper_exact_status(train_root: Path, appliances: tuple[str, ...]) -> None:
+    manifest_path = train_root / "preprocessing_manifest.json"
+    if not manifest_path.is_file():
+        print("  paper-exact CSVs detected (no preprocessing_manifest.json)")
+        return
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return
+    if data.get("mode") != "paper_exact":
+        return
+    print(f"  preprocessing manifest: {_rel(manifest_path)}")
+    for app in appliances:
+        for entry in data.get("appliances", []):
+            if entry.get("appliance") != app:
+                continue
+            exp = entry.get("experiment_training_rows", {})
+            if not exp:
+                break
+            print(f"\n  [{app}] paper-exact timesteps")
+            print(f"    train pool : {exp.get('full_train_pool', 0):,}")
+            print(f"    validation : {exp.get('validation', 0):,}  (fixed for all experiments)")
+            print(f"    test h2    : {exp.get('test_house2', 0):,}  (fixed for all experiments)")
+            if "test_house1" in exp:
+                print(f"    test h1    : {exp['test_house1']:,}")
+            for k, v in exp.get("origin_crops", {}).items():
+                print(f"    origin {k}  : {v:,}")
+            for k, v in exp.get("augmented_mix_rows", {}).items():
+                print(f"    mix {k}    : {v:,}  (training only)")
+            break
+
+
+def required_crop_sizes(scenarios: tuple[GengMixScenario, ...]) -> tuple[int, ...]:
+    sizes = {s.n_real for s in scenarios}
+    return tuple(sorted(sizes))
+
+
+def ensure_geng_splits(
+    appliances: tuple[str, ...],
+    train_root: Path,
+    scenarios: tuple[GengMixScenario, ...],
+    *,
+    validation_percent: float,
+    test_percent: float,
+    skip_house1: bool,
+    force: bool,
+    dry_run: bool,
+) -> list[dict]:
+    """Split house-2 pool 6:2:2 and write only the experiment CSVs needed."""
+    manifests: list[dict] = []
+    crop_sizes = required_crop_sizes(scenarios) if scenarios else (100_000, 200_000)
+
+    for app in appliances:
+        pool_h2 = pool_path(train_root, app, 2)
+        if not pool_h2.is_file():
+            legacy_train = train_root / app / f"{app}_training_.csv"
+            if legacy_train.is_file():
+                print(f"  [{app}] legacy split CSVs present — skip pool split")
+                continue
+            raise FileNotFoundError(
+                f"Missing {_rel(pool_h2)}. Run:\n"
+                f"  python NILM-main/dataset_preprocess/prepare_all_ukdale.py"
+            )
+
+        print(f"\n[{app}] split house-2 pool → train/val/test + origin crops")
+        pool_z = load_pool_csv(pool_h2)
+        train, val, test = split_chronological(pool_z, validation_percent, test_percent)
+        print(
+            f"  pool {len(pool_z):,} rows → train {len(train):,} | val {len(val):,} | "
+            f"test {len(test):,} ({rows_to_days(len(train)):.1f} / "
+            f"{rows_to_days(len(val)):.1f} / {rows_to_days(len(test)):.1f} days)"
+        )
+
+        app_dir = train_root / app
+        split_files = {
+            f"{app}_training_.csv": train,
+            f"{app}_validation_.csv": val,
+            f"{app}_test_.csv": test,
+        }
+        written: dict[str, int] = {}
+        for name, frame in split_files.items():
+            out = app_dir / name
+            if force or not out.is_file():
+                save_zscore_csv(frame, out, dry_run=dry_run)
+            written[name] = len(frame)
+
+        for crop_n in crop_sizes:
+            label = crop_label(crop_n)
+            crop_name = f"{app}_{label}training_.csv"
+            out = app_dir / crop_name
+            if force or not out.is_file():
+                cropped = train.iloc[: min(crop_n, len(train))].reset_index(drop=True)
+                save_zscore_csv(cropped, out, dry_run=dry_run)
+                written[crop_name] = len(cropped)
+                if len(cropped) < crop_n:
+                    print(
+                        f"  warning: train pool has {len(train):,} rows, "
+                        f"requested {crop_n:,} for {crop_name}"
+                    )
+
+        if not skip_house1:
+            pool_h1 = pool_path(train_root, app, 1)
+            h1_out = app_dir / f"{app}_test_home1Small_.csv"
+            if pool_h1.is_file() and (force or not h1_out.is_file()):
+                pool_h1_z = load_pool_csv(pool_h1)
+                print(f"  house-1 pool → {_rel(h1_out)} ({len(pool_h1_z):,} rows)")
+                save_zscore_csv(pool_h1_z, h1_out, dry_run=dry_run)
+                written[f"{app}_test_home1Small_.csv"] = len(pool_h1_z)
+            elif not pool_h1.is_file():
+                print(f"  warning: missing {_rel(pool_h1)} — skip house-1 test CSV")
+
+        manifests.append({"appliance": app, "written": written})
+
+    return manifests
+
+
+def verify_pool_outputs(train_root: Path, appliances: tuple[str, ...]) -> list[str]:
+    missing: list[str] = []
+    print("Checking prepare_all_ukdale pool CSVs:")
+    for app in appliances:
+        for pattern in GENG_POOL_CSVS:
+            path = train_root / app / pattern.format(app=app)
+            if path.is_file():
+                print(f"  OK  {_rel(path)}")
+            else:
+                print(f"  MISS {_rel(path)}")
+                missing.append(_rel(path))
+    print()
+    return missing
+
+
 def verify_prepare_all_outputs(train_root: Path, appliances: tuple[str, ...]) -> list[str]:
     """Check real CSVs from prepare_all_ukdale exist before mixing."""
     missing: list[str] = []
@@ -194,8 +348,9 @@ def verify_prepare_all_outputs(train_root: Path, appliances: tuple[str, ...]) ->
                 missing.append(_rel(path))
     if missing:
         print()
-        print("WARNING: missing prepare_all_ukdale files. Run:")
-        print("  python NILM-main/dataset_preprocess/prepare_all_ukdale.py")
+        print("WARNING: missing experiment CSVs.")
+        print("  Paper-exact: python NILM-main/dataset_preprocess/prepare_all_ukdale.py --paper-exact")
+        print("  Pool mode:   python build_geng_mix.py --splits-only")
     print()
     return missing
 
@@ -497,6 +652,38 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="One-click Geng mix: npy -> X/Y -> all paper scenarios"
     )
+    p.add_argument(
+        "--paper-exact",
+        action="store_true",
+        help="Use CSVs from prepare_all_ukdale.py --paper-exact (skip pool split step)",
+    )
+    p.add_argument(
+        "--splits-only",
+        action="store_true",
+        help="Only split house pools → train/val/test + origin crops (no npy mix)",
+    )
+    p.add_argument(
+        "--force-splits",
+        action="store_true",
+        help="Overwrite split/crop CSVs even if they already exist",
+    )
+    p.add_argument(
+        "--validation-percent",
+        type=float,
+        default=DEFAULT_VAL_PCT,
+        help="House-2 pool 6:2:2 validation fraction (default 20)",
+    )
+    p.add_argument(
+        "--test-percent",
+        type=float,
+        default=DEFAULT_TEST_PCT,
+        help="House-2 pool 6:2:2 test fraction (default 20)",
+    )
+    p.add_argument(
+        "--skip-house1",
+        action="store_true",
+        help="Do not write {app}_test_home1Small_.csv from house-1 pool",
+    )
     p.add_argument("--appliance", choices=list(ALL_APPLIANCES), default=None)
     p.add_argument("--all", action="store_true", help="All five appliances (default if no --appliance)")
     p.add_argument(
@@ -552,15 +739,72 @@ def main() -> None:
         args.skip_existing = True
 
     appliances: tuple[str, ...] = ALL_APPLIANCES if args.all else (args.appliance,)  # type: ignore[arg-type]
-    scenarios = resolve_scenarios(args, appliances=appliances, train_root=args.train_root)
+
+    if args.validation_percent + args.test_percent >= 100:
+        raise ValueError("validation-percent + test-percent must be < 100")
+
+    paper_exact = args.paper_exact or all_have_paper_exact_splits(args.train_root, appliances)
+
+    if args.splits_only:
+        scenarios_for_crops: tuple[GengMixScenario, ...] = GENG_MIX_SCENARIOS
+    else:
+        scenarios_for_crops = resolve_scenarios(args, appliances=appliances, train_root=args.train_root)
+
+    print("Geng mix builder")
+    print(f"  train root:  {_rel(args.train_root)}")
+    print(f"  appliances:  {appliances}")
+    if paper_exact:
+        print("  mode: paper-exact (full timeline splits from prepare_all_ukdale.py)")
+        print_paper_exact_status(args.train_root, appliances)
+    elif args.splits_only:
+        print("  mode: splits-only (from house pools)")
+    else:
+        print(f"  scenarios:   {[s.name for s in scenarios_for_crops]}")
+    print()
+
+    if not paper_exact:
+        pool_missing = verify_pool_outputs(args.train_root, appliances)
+        if pool_missing and not any(
+            has_paper_exact_splits(args.train_root, app) for app in appliances
+        ):
+            raise FileNotFoundError(
+                "No pool CSVs and no paper-exact training CSVs.\n"
+                "  Paper: python NILM-main/dataset_preprocess/prepare_all_ukdale.py --paper-exact\n"
+                "  Pool:  python NILM-main/dataset_preprocess/prepare_all_ukdale.py"
+            )
+
+        ensure_geng_splits(
+            appliances,
+            args.train_root,
+            scenarios_for_crops,
+            validation_percent=args.validation_percent,
+            test_percent=args.test_percent,
+            skip_house1=args.skip_house1,
+            force=args.force_splits,
+            dry_run=args.dry_run,
+        )
+        print()
+    elif not all_have_paper_exact_splits(args.train_root, appliances):
+        missing_apps = [a for a in appliances if not has_paper_exact_splits(args.train_root, a)]
+        raise FileNotFoundError(
+            "Paper-exact mode but missing split CSVs for: "
+            + ", ".join(missing_apps)
+            + "\n  Run: python NILM-main/dataset_preprocess/prepare_all_ukdale.py --paper-exact"
+        )
+
+    if args.splits_only:
+        if not args.skip_verify:
+            verify_prepare_all_outputs(args.train_root, appliances)
+        print_experiment_summary(args.train_root, appliances)
+        return
+
+    scenarios = scenarios_for_crops
     if not scenarios:
         print_experiment_summary(args.train_root, appliances)
         return
 
-    print("Geng mix builder (one-click)")
+    print("Geng mix builder (synthetic)")
     print(f"  npy dir:     {_rel(args.npy_dir)}")
-    print(f"  train root:  {_rel(args.train_root)}")
-    print(f"  appliances:  {appliances}")
     print(f"  scenarios:   {[s.name for s in scenarios]}")
     print()
 

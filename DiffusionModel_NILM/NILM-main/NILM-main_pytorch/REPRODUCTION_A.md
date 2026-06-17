@@ -44,14 +44,14 @@ python build_geng_mix.py --scenario 20_10
 ## Reproduction commands
 
 ```bash
-# 1. UK-DALE CSVs
-python NILM-main/dataset_preprocess/prepare_all_ukdale.py
+# 1. UK-DALE CSVs (paper-exact: full timeline 6:2:2)
+python NILM-main/dataset_preprocess/prepare_all_ukdale.py --paper-exact
 
 # 2. Diffusion sample (≥200k syn timesteps per appliance)
 python run_diffusion_all.py --no-train
 
-# 3. Geng mixes (all 4 augmented scenarios)
-python build_geng_mix.py
+# 3. Geng mixes (paper-exact: skips pool split, builds UK_DALECombined*)
+python build_geng_mix.py --paper-exact
 
 # 4. Train + test (example: EasyS2S kettle, 200k+200k)
 cd NILM-main/NILM-main_pytorch
